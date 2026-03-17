@@ -1,0 +1,43 @@
+version: "3.9"
+
+services:
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./sandbox:/sandbox
+    environment:
+      - SANDBOX_ROOT=/sandbox
+      - DATABASE_URL=postgresql://aijah:aijah@postgres:5432/aijah
+      - OLLAMA_URL=http://ollama:11434
+    depends_on:
+      - postgres
+      - ollama
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:80"
+
+  postgres:
+    image: postgres:16
+    environment:
+      - POSTGRES_USER=aijah
+      - POSTGRES_PASSWORD=aijah
+      - POSTGRES_DB=aijah
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  ollama:
+    image: ollama/ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+
+volumes:
+  pgdata:
+  ollama_data:
