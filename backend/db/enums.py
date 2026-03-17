@@ -107,6 +107,16 @@ class DeviceType(str, Enum):
     SERVER = "SERVER"
 
 
+class SourceType(str, Enum):
+    MODEL = "MODEL"
+    USER = "USER"
+    RULE = "RULE"
+    TOOL = "TOOL"
+    EXPLICIT_USER = "EXPLICIT_USER"
+    INFERRED = "INFERRED"
+    APPROVED = "APPROVED"
+
+
 # --- Phase 2 enums (defined here for reference, not used in Phase 1 DB) ---
 
 class EntityType(str, Enum):
