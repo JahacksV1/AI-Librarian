@@ -1,0 +1,334 @@
+AIJAH Docker Strategy and Roadmap
+Current State
+The project is 100% specification -- 6 design docs, zero implementation. No docker-compose.yml, no Dockerfiles, no backend code, no frontend code, no SQL migrations, no sandbox folder. This is actually ideal: you can set up Docker correctly from the start rather than retrofitting it later.
+The V1 contract already defines a 4-service Docker Compose stack:
+frontend (:3000) -- static HTML/JS via nginx
+backend (:8000) -- Python 3.11 + FastAPI
+postgres (:5432) -- PostgreSQL 16
+ollama (:11434) -- local LLM runtime
+
+Part 1: What the Docker Person Can Do in Parallel (and When)
+Immediately (before any backend code exists)
+The Docker person does NOT need to wait for the coder to start. These tasks are standalone:
+Write docker-compose.yml with all 4 services, volumes, networks, environment variables -- the contract in V1_CONTRACT.md lines 37-73 gives the exact outline
+Write backend/Dockerfile -- even with just a "hello world" FastAPI stub, the Dockerfile structure is the same whether the app has 1 route or 50
+Write frontend/Dockerfile-- nginx serving a staticindex.html placeholder
+Write .dockerignore files for both backend/ and frontend/ (exclude __pycache, .git, node_modules, *.pyc, etc.)
+Create the sandbox/ directory with test files inside it (fake invoices, folders) for end-to-end testing later
+Create backend/db/migrations/001_create_enums.sql and 002_create_tables.sql using the exact schemas from V1_CONTRACT.md and TYPE_LEDGER.md
+Create backend/db/seed.sql -- insert a test user and device row
+Get docker compose up booting to green with all 4 services healthy
+While the coder builds the backend (ongoing)
+Run migrations against the live Postgres container and verify all 13 tables exist
+Run seed data and verify with psql or a GUI tool
+Pull the Ollama model -- docker exec ollama ollama pull qwen2.5 (this takes time, good to do early)
+Practice inspecting containers -- docker ps, docker logs backend -f, docker exec -it postgres psql -U aijah -d aijah
+Test volume persistence -- stop the stack, bring it back up, confirm Postgres data and the Ollama model are still there
+Test volume reset -- docker compose down -v to wipe everything, re-run migrations, confirm clean slate
+Iterate on health checks (see Part 2 below)
+After basic backend routes exist
+Run the full 9-step V1 demo end-to-end inside Docker
+Test failure scenarios -- kill the backend container mid-execution, restart, verify DB state is consistent
+Document the operational playbook -- how to start, stop, reset, view logs, connect to DB, pull new models
+
+Part 2: Docker Features That Make AIJAH Genuinely Better (Not Just "Runs in Docker")
+These are not "nice to haves." Each one prevents a real class of bugs or operational pain.
+1. Health checks with depends_on conditions
+Problem they solve: Without this, the backend starts before Postgres is accepting connections, the DB connection fails, and the app crashes on boot. Similarly, Ollama needs time to load before the agent loop can call it.
+services:
+  postgres:
+    image: postgres:16
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aijah -d aijah"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  ollama:
+    image: ollama/ollama
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:11434/api/tags || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  backend:
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+This is a real Docker Compose v2 feature -- condition: service_healthy means the backend container will not start until Postgres and Ollama have passed their health checks. This eliminates the entire class of "startup race condition" bugs.
+2. Postgres initdb scripts for automatic migration
+Problem they solve: Manual migration running is error-prone. Forget to run it once and you get table-not-found errors.
+Postgres's official Docker image automatically executes any .sql or .sh files found in /docker-entrypoint-initdb.d/ when the container initializes for the first time (only when the data volume is empty). This means:
+postgres:
+  image: postgres:16
+  volumes:
+    - pgdata:/var/lib/postgresql/data
+    - ./backend/db/migrations:/docker-entrypoint-initdb.d
+Place the migration files as 001_create_enums.sql, 002_create_tables.sql, 003_seed.sql and they run in alphabetical order on first boot. On subsequent boots (when pgdata volume already has data), they are skipped.
+Important caveat: this only runs on first initialization. For schema changes after the DB already has data, you need a migration runner (like Alembic), or manually apply diffs. But for Phase 1, this is perfect.
+3. Resource limits for Ollama
+Problem they solve: Ollama loading qwen2.5 can consume several GB of RAM. On a machine with 16GB, this can OOM the entire system or starve Postgres and the backend.
+ollama:
+  image: ollama/ollama
+  deploy:
+    resources:
+      limits:
+        memory: 8G
+      reservations:
+        memory: 4G
+This tells Docker: Ollama can use up to 8GB but should reserve 4GB. If it tries to exceed 8GB, Docker will kill the container rather than letting it crash the host. Adjust numbers based on the actual machine's RAM.
+4. Named volumes vs. bind mounts (using each correctly)
+AIJAH needs both types:
+Named volumes for data that Docker manages: pgdata (database files), ollama_data (model weights). These survive docker compose down but can be wiped with docker compose down -v.
+Bind mounts for data shared between host and container: ./sandbox:/sandbox (user's files), ./backend:/app (for development hot-reload). These point to real directories on the host filesystem.
+The distinction matters because:
+Named volumes are faster on Docker Desktop (especially Windows/macOS) due to caching
+Bind mounts are visible/editable from the host (needed for sandbox files and development)
+docker compose down -v deletes named volumes but does NOT touch bind mounts -- so sandbox files are safe
+5. Multi-stage Docker builds for the backend
+Problem they solve: A naive Dockerfile that installs all build dependencies produces a 1.5GB+ image. Multi-stage builds produce a ~200MB image.
+# Stage 1: Install dependencies
+FROM python:3.11-slim AS builder
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+
+# Stage 2: Runtime image
+FROM python:3.11-slim
+WORKDIR /app
+COPY --from=builder /install /usr/local
+COPY . .
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+Smaller images start faster, use less disk, and have a smaller attack surface.
+6. Docker Compose watch for development hot-reload
+This is a Docker Compose v2.22+ feature. Instead of rebuilding the container every time you change a Python file:
+backend:
+  develop:
+    watch:
+      - action: sync
+        path: ./backend
+        target: /app
+      - action: rebuild
+        path: ./backend/requirements.txt
+
+File changes in ./backend are synced into the running container instantly (no rebuild)
+Changes to requirements.txt trigger a full rebuild (new dependencies)
+Combined with uvicorn's --reload flag, this gives the coder instant feedback without leaving Docker.
+7. Structured logging to stdout
+Problem they solve: The agent loop has critical observability requirements (see AGENT_LOOP.md lines 180-239). If logs go to files inside the container, they vanish when the container is recreated.
+The coding pattern is: log everything to stdout as structured JSON. Docker captures stdout automatically. View it with:
+docker logs backend -f              # follow live
+docker logs backend --since 5m      # last 5 minutes
+docker logs backend 2>&1 | grep "tool_call"  # filter
+No log files, no log rotation config, no volume mounts for logs. Docker handles it.
+
+Part 3: Coding Patterns the Coder Must Follow for Smooth Docker Integration
+These are things the backend developer needs to get right from day 1. If these patterns are broken, Docker integration will be painful.
+1. All configuration via environment variables
+Every connection string, path, and tunable must come from env vars, never hardcoded:
+import os
+
+DATABASE_URL = os.environ["DATABASE_URL"]       # postgresql://aijah:aijah@postgres:5432/aijah
+OLLAMA_URL = os.environ["OLLAMA_URL"]           # http://ollama:11434
+SANDBOX_ROOT = os.environ["SANDBOX_ROOT"]       # /sandbox
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5")
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
+The V1 contract already specifies these in the environment: block of docker-compose.yml. The code reads them; the Docker config sets them.
+2. Service discovery by DNS name, never localhost
+Inside Docker Compose, services reach each other by their service name. The backend connects to postgres:5432 not localhost:5432. The backend connects to ollama:11434 not localhost:11434. This is already in the contract's DATABASE_URL and OLLAMA_URL values.
+If the coder ever hardcodes localhost, it will work outside Docker but fail inside Docker. All URLs must come from env vars.
+3. Startup retry logic for upstream services
+Even with health checks, there are edge cases. The backend should retry connections at startup:
+import asyncio
+from asyncpg.exceptions import ConnectionDoesNotExistError
+
+async def wait_for_postgres(database_url: str, max_retries: int = 10):
+    for attempt in range(max_retries):
+        try:
+            conn = await asyncpg.connect(database_url)
+            await conn.close()
+            return
+        except (ConnectionRefusedError, ConnectionDoesNotExistError, OSError):
+            await asyncio.sleep(2 ** attempt * 0.1)  # exponential backoff
+    raise RuntimeError("Could not connect to Postgres")
+This makes the app resilient to brief network hiccups during container startup.
+4. Log to stdout, structured JSON format
+import logging, json, sys
+
+handler = logging.StreamHandler(sys.stdout)
+handler.setFormatter(logging.Formatter(json.dumps({
+    "time": "%(asctime)s",
+    "level": "%(levelname)s",
+    "message": "%(message)s"
+})))
+Or use a library like python-json-logger. The point is: no logging.FileHandler, no writing to /var/log/. stdout only.
+5. All file operations relative to SANDBOX_ROOT
+Never construct a path like /home/user/documents/invoices. Always:
+import os
+target = os.path.join(os.environ["SANDBOX_ROOT"], relative_path)
+This means the same code works whether SANDBOX_ROOT is /sandbox (Docker) or ./sandbox (local development).
+6. Graceful shutdown handling
+FastAPI supports shutdown events. Use them so docker compose down is clean:
+@app.on_event("shutdown")
+async def shutdown():
+    await db_pool.close()
+    await mcp_session.close()
+Without this, docker compose down sends SIGTERM, the process ignores it, Docker waits 10 seconds, then sends SIGKILL, which can leave DB connections in a bad state.
+
+Part 4: Docker Learning Roadmap (Phased, Including Future Value)
+Tier 1 -- Learn Now, Use Now (Phase 1)
+Concept
+Why
+Practical Exercise
+Images vs. containers vs. volumes
+Foundation of Docker
+Run docker images, docker ps, docker volume ls
+docker-compose.yml syntax
+The project's infrastructure definition
+Write the AIJAH compose file from the V1 contract
+docker compose up / down / logs
+Daily workflow
+Boot the stack, read logs, tear it down
+Dockerfile syntax (FROM, COPY, RUN, CMD)
+Builds backend and frontend images
+Write a Dockerfile for a FastAPI hello-world
+docker exec
+Debug running containers
+docker exec -it postgres psql -U aijah -d aijah
+Volume persistence and reset
+Data lifecycle management
+Stop/start stack, verify data. Then down -v, verify clean
+Health checks
+Reliable startup ordering
+Add health checks to all 4 services
+Bind mounts vs named volumes
+Know when to use which
+Sandbox = bind mount, pgdata = named volume
+docker compose ps and docker inspect
+See what's running and how it's configured
+Inspect network settings, port mappings, volume mounts
+Environment variables in compose
+Configuration management
+Understand the environment: block for each service
+
+Tier 2 -- Learn Now, Use in Phase 2
+Concept
+Why
+When It Pays Off
+Multi-stage builds
+Smaller images, faster deploys
+Useful immediately but critical when images get complex in Phase 2
+Docker Compose watch
+Hot-reload without leaving Docker
+Makes Phase 2 development dramatically faster
+Docker networking (bridge networks, DNS)
+MCP server becomes its own container in Phase 2
+Backend needs to reach mcp-server:8001 by DNS name
+docker compose --profile
+Dev vs. test configurations
+Run different service sets for different contexts
+Container resource limits (deploy.resources)
+Ollama memory management
+Prevents OOM, especially when adding embedding model in Phase 2
+Postgres extensions in Docker
+pgvector requires CREATE EXTENSION vector
+Phase 2 adds vector search; image may change to pgvector/pgvector:pg16
+
+Tier 3 -- Learn After Phase 1, Use in Phase 3
+Concept
+Why
+When It Pays Off
+GPU passthrough (nvidia-container-toolkit)
+10-50x faster Ollama inference, required for Whisper
+Phase 3 adds voice (Whisper model needs GPU for real-time)
+Multiple Ollama models in one container
+qwen2.5 + nomic-embed-text + whisper
+Phase 2/3 runs multiple models
+Docker Compose extends / shared configs
+Reduce duplication as services grow
+Phase 3 may have 6-8 services
+Basic CI/CD with Docker (GitHub Actions)
+Automated testing in containers
+When the project has tests worth automating
+Log aggregation
+Unified view across all containers
+When 5+ containers make docker logs per-service impractical
+Docker secrets
+Secure credential management
+If AIJAH ever connects to external APIs or cloud services
+
+
+Part 5: Phase-by-Phase Docker Architecture Changes
+Phase 1 (current) -- 4 services
+frontend (:3000) ─── backend (:8000) ─── postgres (:5432)
+                          │
+                      ollama (:11434)
+                          │
+                    [sandbox bind mount]
+MCP server runs inside the backend process. No separate container.
+Phase 2 -- 5 services (MCP extracted)
+frontend (:3000) ─── backend (:8000) ─── postgres+pgvector (:5432)
+                          │
+                     mcp-server (:8001) ─── [sandbox bind mount]
+                          │
+                      ollama (:11434)
+                          │
+               [qwen2.5 + nomic-embed-text models]
+Key Docker change: MCP server becomes its own container. Backend connects to it via http://mcp-server:8001/mcp. The MCP tool implementations and the sandbox bind mount move to this new container. Backend becomes a pure orchestrator.
+Phase 3 -- 6-8 services (voice, browser control)
+frontend (:3000) ─── backend (:8000) ─── postgres+pgvector (:5432)
+                          │
+                     mcp-server (:8001) ─── [sandbox bind mount]
+                          │
+                      ollama (:11434) ─── [GPU passthrough]
+                          │
+                    whisper-server (:8002) ─── [voice input]
+                          │
+                    tts-server (:8003) ─── [voice output]
+This is why learning Docker networking, resource limits, and multi-service orchestration now (even if you only run 4 services) pays off massively in Phase 3.
+
+Part 6: What to Build First (Execution Order for Docker Person)
+Install Docker Desktop, verify it runs
+Create docker-compose.yml with all 4 services (use the V1 contract as the spec)
+Create a minimal backend/Dockerfile (just a FastAPI hello-world returning {"status": "ok"})
+Create a minimal frontend/Dockerfile (nginx serving a static HTML page)
+Create backend/db/migrations/001_create_enums.sql and 002_create_tables.sql from the TYPE_LEDGER and V1_CONTRACT
+Mount migrations into Postgres's initdb directory
+Run docker compose up and get all 4 services green
+Connect to Postgres (psql or GUI) and verify all 13 tables exist
+Pull qwen2.5 into Ollama: docker exec ollama ollama pull qwen2.5
+Create sandbox/ directory with sample test files
+Add health checks to all services
+Write seed data SQL
+Document the setup in a DOCKER_OPS.md playbook
+After this, the Docker person is unblocked to support the coder's backend work -- running migrations for schema changes, debugging container issues, testing the full stack.
+Phase 1 Docker service map
+
+frontend
+- purpose: static UI
+- image: nginx:alpine
+- host port: 3000
+- container role: serves frontend files
+
+backend
+- purpose: FastAPI orchestration
+- base image: python:3.11-slim
+- host port: 8000
+- container role: API, agent loop, project logic
+
+postgres
+- purpose: database
+- image: postgres:16
+- host port: 5432
+- container role: stores sessions, plans, actions, memory events
+
+ollama
+- purpose: local LLM runtime
+- image: ollama/ollama:latest
+- host port: 11434
+- container role: runs local model
+

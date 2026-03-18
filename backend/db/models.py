@@ -153,9 +153,9 @@ class Session(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     summary: Mapped[str | None] = mapped_column(Text)
 
     user: Mapped["User"] = relationship(back_populates="sessions")
-    device: Mapped["Device" | None] = relationship(back_populates="sessions")
+    device: Mapped["Device | None"] = relationship(back_populates="sessions")
     messages: Mapped[list["SessionMessage"]] = relationship(back_populates="session")
-    task_state: Mapped["TaskState" | None] = relationship(back_populates="session")
+    task_state: Mapped["TaskState | None"] = relationship(back_populates="session")
     plans: Mapped[list["Plan"]] = relationship(back_populates="session")
     memory_events: Mapped[list["MemoryEvent"]] = relationship(back_populates="session")
 
@@ -241,7 +241,7 @@ class TaskState(UUIDPrimaryKeyMixin, Base):
     )
 
     session: Mapped["Session"] = relationship(back_populates="task_state")
-    active_plan: Mapped["Plan" | None] = relationship(back_populates="task_states")
+    active_plan: Mapped["Plan | None"] = relationship(back_populates="task_states")
 
 
 class FileEntity(UUIDPrimaryKeyMixin, Base):
@@ -376,8 +376,8 @@ class MemoryEvent(UUIDPrimaryKeyMixin, Base):
     )
 
     user: Mapped["User"] = relationship(back_populates="memory_events")
-    device: Mapped["Device" | None] = relationship(back_populates="memory_events")
-    session: Mapped["Session" | None] = relationship(back_populates="memory_events")
+    device: Mapped["Device | None"] = relationship(back_populates="memory_events")
+    session: Mapped["Session | None"] = relationship(back_populates="memory_events")
 
 
 class UserPreference(UUIDPrimaryKeyMixin, TimestampMixin, Base):

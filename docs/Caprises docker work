@@ -79,4 +79,134 @@ Scripts run in order on first boot when pgdata volume is empty
 Verified: docker compose down -v then docker compose up — all three scripts executed
 Verified: tables created, seed data present (users, devices)
 
+---
 
+LAYER 1 VERIFICATION PLAN
+
+Run through this checklist to confirm Layer 1 is fully complete. Check off each item as verified.
+
+[x] 1. docker compose up — all 4 containers start, no port errors
+     Command: docker compose up --build
+     Expected: frontend, backend, postgres, ollama all show "healthy" or "running"
+
+[x] 2. docker logs backend — shows "Application startup complete"
+     Command: docker compose logs backend
+     Expected: Uvicorn running, lifespan startup complete, no connection errors
+
+[x] 3. docker logs postgres — migration files ran on init (first boot only)
+     Command: docker compose logs postgres
+     Expected: On fresh volume, logs show 001, 002, 003 executing
+
+[x] 4. Connect to postgres on localhost:5433
+     Connection: host=localhost, port=5433, user=aijah, password=aijah, db=aijah
+     Tool: DBeaver, TablePlus, psql, or any Postgres client
+
+[x] 5. Verify all 12 tables exist
+     SQL: SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' ORDER BY table_name;
+     Expected: devices, file_entities, folder_entities, memory_events, operational_policies, plan_actions, plans, session_messages, sessions, task_state, user_preferences, users
+
+[x] 6. Verify seed data present
+     SQL: SELECT * FROM users; SELECT * FROM devices;
+     Expected: Test user (00000000-0000-0000-0000-000000000001), Test device (00000000-0000-0000-0000-000000000002)
+
+[x] 7. GET http://localhost:8000/health
+     Expected: {"status": "ok", "db": "connected", "ollama": "reachable"}
+     Note: ollama may show "unreachable" until model is pulled — see Item 8
+
+[x] 8. Pull Ollama model (SYNC roadmap Item 4)
+     Command: docker compose exec ollama ollama pull qwen2.5
+     Note: ~5GB download, one-time. Persists in ollama_data volume.
+     After pull: curl -s http://localhost:8000/health should show ollama: "reachable"
+
+[x] 9. Volume persistence test
+     Verified: down → up -d → 1 user in DB. Volumes persist.
+
+[x] 10. Volume reset test
+     Verified: down -v → up -d → 12 tables, 1 user. Init scripts re-ran on fresh volume.
+
+---
+
+LAYER 1 COMPLETE ✓
+
+All 10 verification items done. Health checks and .dockerignore in place.
+Two optional items (Ollama resource limits, multi-stage Dockerfile) deferred to Phase 2.
+
+---
+
+LAYER 1 REMAINING ITEMS (from docs/docker)
+
+These improve reliability and cleanliness. Recommended before calling Layer 1 "done":
+
+[x] Health checks with depends_on conditions
+     Added healthcheck to postgres and ollama in docker-compose.yml
+     Added condition: service_healthy to backend's depends_on
+     Prevents backend starting before Postgres/Ollama are ready
+
+[x] .dockerignore files
+     Created backend/.dockerignore and frontend/.dockerignore
+     Excludes: __pycache__, .git, *.pyc, .env, etc.
+
+[x] Optional: Resource limits for Ollama
+     Added mem_limit: 8g, mem_reservation: 4g to ollama in docker-compose.yml
+     Verified: docker inspect shows 8589934592 (8GB). Prevents OOM.
+
+[x] Optional: Multi-stage backend Dockerfile
+     Two-stage build: builder installs deps, runtime copies only /install + source.
+     Verified: build works, health ok, image size 405MB.
+
+---
+
+LAYER 2 DOCKER PLAN (Phase 2 — Install the Brain)
+
+When: After all 9 V1 demo steps pass end-to-end.
+
+Architecture change: 4 services → 5 services. MCP server becomes its own container.
+
+New service:
+  mcp-server (:8001)
+  - Purpose: MCP tools, sandbox access, file operations
+  - Backend connects via http://mcp-server:8001/mcp
+  - Sandbox bind mount moves from backend to mcp-server
+
+Docker changes:
+  - Add mcp-server service to docker-compose.yml
+  - Move ./sandbox bind mount to mcp-server
+  - Backend env: MCP_URL=http://mcp-server:8001
+  - Postgres: switch to pgvector/pgvector:pg16 or add pgvector extension
+  - New migrations: 003_add_pgvector.sql, embeddings tables, entity tables
+  - Ollama: add nomic-embed-text model for embeddings
+
+---
+
+LAYER 3 DOCKER PLAN (Phase 3 — Grow the Brain)
+
+When: After Phase 2 memory retrieval is working.
+
+Architecture change: 5 services → 6–8 services.
+
+New services (examples):
+  - whisper-server (:8002) — voice input
+  - tts-server (:8003) — voice output
+  - Optional: browser-control service
+
+Docker changes:
+  - GPU passthrough for Ollama (nvidia-container-toolkit) — required for Whisper
+  - Resource limits and profiles for dev vs. prod
+  - Log aggregation if container count grows
+
+---
+
+CLEANUP ITEMS
+
+[x] Fix postgres/init filename: " 001_create_enums.sql" had leading space
+     Renamed to: 001_create_enums.sql
+     Ensures consistent alphabetical ordering and avoids confusion
+
+---
+
+NOTES
+
+- Layer 1 = Phase 1 = "The Body" — Docker + DB + basic stack
+- Partner (coder) owns: backend agent loop, API routes, frontend, MCP tools
+- Caprice (Docker) owns: compose, migrations, volumes, postgres, ollama, sandbox
+- All 9 V1 demo steps must pass before Phase 2. See SYNC_AND_STEP6_ROADMAP.md.

@@ -20,7 +20,6 @@ mcp = FastMCP(
         "All filesystem actions must stay inside SANDBOX_ROOT. "
         "Plans must be proposed before execution, and execution only applies to APPROVED actions."
     ),
-    stateless_http=True,
 )
 
 
@@ -94,4 +93,4 @@ async def update_task_state_tool(
     )
 
 
-mcp_http_app = mcp.streamable_http_app()
+mcp_http_app = mcp.http_app(stateless_http=True)
