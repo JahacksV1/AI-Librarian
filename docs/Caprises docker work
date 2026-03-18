@@ -67,5 +67,16 @@ Postgres initialized and accepting connections
 Ollama container running
 Sandbox directory mounted and accessible
 
+11. Fixed Postgres host port conflict (SYNC roadmap Item 1)
+Changed postgres ports from 5432:5432 to 5433:5432 in docker-compose.yml
+Host port 5432 was in use; now using 5433 for external connections
+DATABASE_URL unchanged (still uses internal postgres:5432)
+
+12. Auto-run migrations on first boot (SYNC roadmap Item 2)
+Created postgres/init/ with 001_create_enums.sql, 002_create_tables.sql, 003_seed.sql
+Added volume mount ./postgres/init:/docker-entrypoint-initdb.d to postgres service
+Scripts run in order on first boot when pgdata volume is empty
+Verified: docker compose down -v then docker compose up — all three scripts executed
+Verified: tables created, seed data present (users, devices)
 
 
