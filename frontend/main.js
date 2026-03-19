@@ -1,10 +1,30 @@
+/**
+ * Application entry: DOM wiring, panels, session UX.
+ * Backend I/O lives under ./api/ (backendApi, http, sse, health).
+ */
 import "./styles.css";
-import { checkHealth, createSession, sendMessage, getPlan, patchAction, approveAll, executePlan } from "./api/client.js";
+import {
+  checkHealth,
+  createSession,
+  sendMessage,
+  getPlan,
+  patchAction,
+  approveAll,
+  executePlan,
+} from "./api/backendApi.js";
 import { readSSEStream } from "./api/sse.js";
+import { isHealthOk, describeHealthFailure } from "./api/health.js";
+import { loadDemo } from "./demo/demoMode.js";
 import { getState, setState, subscribe } from "./state/store.js";
 import { routeEvent } from "./state/router.js";
 import { initPlanPanel, setPlan, setPlanError, setInteractionsLocked } from "./panels/plan.js";
-import { initConversation, addUserMessage, startAssistantMessage, appendToken, finalizeAssistantMessage, addToolMessage } from "./panels/conversation.js";
+import {
+  initConversation,
+  addUserMessage,
+  startAssistantMessage,
+  finalizeAssistantMessage,
+  addToolMessage,
+} from "./panels/conversation.js";
 import { initActivity, logEvent } from "./panels/activity.js";
 import { setComposerState } from "./panels/composer.js";
 
@@ -42,8 +62,12 @@ initPlanPanel($("#plan-root"), {
   onApproveAction: (id) => patchAndRefresh(id, "APPROVED"),
   onRejectAction: (id) => patchAndRefresh(id, "REJECTED"),
   onApproveAll: async (planId) => {
-    try { await approveAll(planId); setPlan(await getPlan(planId)); }
-    catch (e) { planError("Approve all failed", e); }
+    try {
+      await approveAll(planId);
+      setPlan(await getPlan(planId));
+    } catch (e) {
+      planError("Approve all failed", e);
+    }
   },
   onExecute: async (planId) => {
     try {
@@ -79,7 +103,7 @@ function syncDividers() {
   const msgVis = messagesPanel.style.display !== "none";
   const planVis = planPanel.style.display !== "none";
   const actVis = activityPanel.style.display !== "none";
-  divider.style.display = (msgVis && planVis) ? "" : "none";
+  divider.style.display = msgVis && planVis ? "" : "none";
   hdivider.style.display = actVis ? "" : "none";
 }
 
@@ -87,7 +111,10 @@ function syncDividers() {
 
 composerSend.addEventListener("click", handleSend);
 composerInput.addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); }
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    handleSend();
+  }
 });
 composerInput.addEventListener("input", () => {
   composerInput.style.height = "";
@@ -148,7 +175,7 @@ subscribe((s) => {
 retryBtn.addEventListener("click", initSession);
 initSession();
 
-// --- Core functions ---
+// --- Session + messaging ---
 
 async function initSession() {
   setState({ uiState: "initializing", sessionId: null, activePlanId: null });
@@ -156,14 +183,25 @@ async function initSession() {
 
   try {
     const health = await checkHealth();
-    if (health.status !== "ok") throw new Error(describeHealth(health));
+    if (!isHealthOk(health)) throw new Error(describeHealthFailure(health));
     const session = await createSession();
     setState({ sessionId: session.id, uiState: "idle" });
     setComposerState(composerInput, composerSend, true, "Describe what you want to organize...");
   } catch (e) {
     setState({ uiState: "error" });
     setComposerState(composerInput, composerSend, false, "Backend offline.");
-    loadDemo();
+    loadDemo({
+      addUserMessage,
+      startAssistantMessage,
+      finalizeAssistantMessage,
+      addToolMessage,
+      logEvent,
+      setPlan,
+      setState,
+      setComposerState,
+      composerInput,
+      composerSend,
+    });
   }
 }
 
@@ -194,8 +232,11 @@ async function handleSend() {
 
 async function loadPlan(planId) {
   if (!planId) return;
-  try { setPlan(await getPlan(planId)); }
-  catch (e) { planError("Plan load failed", e); }
+  try {
+    setPlan(await getPlan(planId));
+  } catch (e) {
+    planError("Plan load failed", e);
+  }
 }
 
 async function patchAndRefresh(actionId, status) {
@@ -203,52 +244,13 @@ async function patchAndRefresh(actionId, status) {
     await patchAction(actionId, status);
     const pid = getState().activePlanId;
     if (pid) setPlan(await getPlan(pid));
-  } catch (e) { planError("Action update failed", e); }
+  } catch (e) {
+    planError("Action update failed", e);
+  }
 }
 
 function planError(label, e) {
   const msg = e instanceof Error ? e.message : label;
   setPlanError(msg);
   logEvent("error", `${label}: ${msg}`);
-}
-
-function describeHealth(h) {
-  const parts = [];
-  if (h?.db && h.db !== "connected") parts.push(`DB: ${h.db}`);
-  if (h?.ollama && h.ollama !== "reachable") parts.push(`Ollama: ${h.ollama}`);
-  return parts.length ? `System unhealthy — ${parts.join(", ")}` : "System health degraded.";
-}
-
-// --- Demo mode (shows what the UI looks like with real data) ---
-
-function loadDemo() {
-  addUserMessage("Can you organize my invoices folder?");
-
-  startAssistantMessage();
-  finalizeAssistantMessage("I'll scan your invoices folder and propose a reorganization plan. Let me take a look...");
-
-  addToolMessage("Using scan_folder", { path: "/sandbox/invoices", recursive: true });
-  addToolMessage("Result: scan_folder", { files: 12, folders: 3, summary: "Scanned 12 files across 3 folders." });
-
-  logEvent("tool_call", "scan_folder(path: \"/sandbox/invoices\", recursive: true)");
-  logEvent("tool_result", "scan_folder — 12 files, 3 folders");
-  logEvent("tool_call", "propose_plan(goal: \"Organize invoices by year and client\")");
-  logEvent("tool_result", "propose_plan — plan created");
-  logEvent("plan", "Plan created: demo-plan — 4 actions");
-
-  setPlan({
-    id: "demo-plan",
-    goal: "Organize invoices by year and client",
-    rationale_summary: "Files are currently flat in /invoices. Restructuring by year/client folders improves findability.",
-    status: "PENDING",
-    actions: [
-      { id: "a1", action_type: "CREATE_FOLDER", status: "PENDING", action_payload_json: { from_path: "(new)", to_path: "/sandbox/invoices/2024/ClientA" } },
-      { id: "a2", action_type: "MOVE", status: "PENDING", action_payload_json: { from_path: "/sandbox/invoices/inv-001.pdf", to_path: "/sandbox/invoices/2024/ClientA/inv-001.pdf" } },
-      { id: "a3", action_type: "MOVE", status: "APPROVED", action_payload_json: { from_path: "/sandbox/invoices/inv-002.pdf", to_path: "/sandbox/invoices/2024/ClientA/inv-002.pdf" } },
-      { id: "a4", action_type: "RENAME", status: "EXECUTED", action_payload_json: { from_path: "/sandbox/invoices/receipt.pdf", to_path: "/sandbox/invoices/2024/ClientB/2024-03_receipt_ClientB.pdf" } },
-    ],
-  });
-
-  setState({ uiState: "awaiting_approval", activePlanId: "demo-plan" });
-  setComposerState(composerInput, composerSend, false, "Review the plan above.");
 }

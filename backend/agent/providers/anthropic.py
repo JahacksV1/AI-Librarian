@@ -44,7 +44,6 @@ class AnthropicProvider(ModelProvider):
             "model": settings.effective_model_name,
             "max_tokens": 4096,
             "messages": api_messages,
-            "stream": True,
         }
         if system_prompt:
             kwargs["system"] = system_prompt

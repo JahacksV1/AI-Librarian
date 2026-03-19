@@ -4,6 +4,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY . .
+# Same-origin /api in browser → nginx proxies to FastAPI (see nginx.conf)
 ARG VITE_API_BASE=/api
 ENV VITE_API_BASE=${VITE_API_BASE}
 RUN npm run build
