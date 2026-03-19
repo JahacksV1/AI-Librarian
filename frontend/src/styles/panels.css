@@ -1,0 +1,265 @@
+.app {
+  height: 100%;
+  display: grid;
+  grid-template-rows: auto 1fr;
+}
+
+.status-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+}
+
+.status-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #9ca3af;
+}
+
+.status-pill[data-tone='idle'] .status-dot,
+.status-pill[data-tone='complete'] .status-dot,
+.status-pill[data-tone='ready'] .status-dot {
+  background: #10b981;
+}
+
+.status-pill[data-tone='streaming'] .status-dot,
+.status-pill[data-tone='scanning'] .status-dot,
+.status-pill[data-tone='awaiting_approval'] .status-dot,
+.status-pill[data-tone='executing'] .status-dot {
+  background: #f59e0b;
+}
+
+.status-pill[data-tone='error'] .status-dot {
+  background: #ef4444;
+}
+
+.workspace {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) 6px var(--bottom-panel);
+  padding: 12px;
+  gap: 0;
+}
+
+.top-grid {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: var(--left-panel) 6px minmax(0, 1fr);
+}
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  min-height: 0;
+  overflow: hidden;
+}
+
+.panel.bottom-panel {
+  min-height: 120px;
+}
+
+.divider {
+  background: transparent;
+}
+
+.divider.vertical {
+  cursor: col-resize;
+}
+
+.divider.horizontal {
+  cursor: row-resize;
+}
+
+.panel-content {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.panel-header {
+  padding: 12px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.panel-header h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.panel-empty {
+  margin: 14px;
+  color: var(--muted);
+}
+
+.panel-error {
+  margin: 8px 12px;
+  color: #b91c1c;
+  font-size: 13px;
+}
+
+.plan-card {
+  min-height: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.goal,
+.rationale {
+  margin: 0;
+  padding: 0 12px;
+  line-height: 1.45;
+}
+
+.action-list {
+  margin: 0;
+  padding: 0 12px 12px;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+}
+
+.action-row {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.action-main {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.action-type {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.action-path {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  color: var(--muted);
+  word-break: break-word;
+}
+
+.action-controls,
+.panel-actions {
+  display: flex;
+  gap: 8px;
+  padding: 0 12px 12px;
+}
+
+.conversation-panel .messages {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.msg {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px;
+}
+
+.msg-user {
+  margin-left: 24%;
+  background: #f8fafc;
+}
+
+.msg-assistant {
+  margin-right: 24%;
+  background: #ffffff;
+}
+
+.msg-tool {
+  margin-right: 24%;
+  background: #fafafa;
+}
+
+.msg p,
+.msg pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.composer {
+  border-top: 1px solid var(--border);
+  padding: 12px;
+  display: flex;
+  gap: 8px;
+}
+
+.composer textarea {
+  flex: 1;
+  resize: none;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+  min-height: 42px;
+  max-height: 120px;
+}
+
+.activity-panel {
+  min-height: 0;
+}
+
+.activity-list {
+  margin: 0;
+  padding: 10px 12px;
+  list-style: none;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.activity-entry {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  display: grid;
+  grid-template-columns: 18px 1fr auto;
+  gap: 8px;
+  align-items: center;
+  font-size: 13px;
+}
+
+.activity-text {
+  color: var(--text);
+}
+
+.activity-time {
+  color: var(--muted);
+  font-size: 12px;
+}
