@@ -1,0 +1,3 @@
+Invoice 0042
+Line items unclear — verify against contract
+Amount: 3300.00

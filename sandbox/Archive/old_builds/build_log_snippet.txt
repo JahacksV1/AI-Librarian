@@ -1,0 +1,2 @@
+[WARN] path too long
+[OK] module core

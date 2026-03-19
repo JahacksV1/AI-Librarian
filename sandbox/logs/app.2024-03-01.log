@@ -1,0 +1,3 @@
+INFO boot
+WARN slow query 1200ms
+ERROR timeout contacting vendor API

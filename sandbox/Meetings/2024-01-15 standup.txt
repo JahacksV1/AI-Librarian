@@ -1,0 +1,3 @@
+Attendees: A, B, C
+Blockers: waiting on API keys
+Next: demo Friday

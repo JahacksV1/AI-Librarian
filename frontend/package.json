@@ -4,12 +4,13 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite --host 0.0.0.0 --port 3000 --strictPort",
+    "dev": "vite --host 0.0.0.0 --port 3000",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview --host 0.0.0.0 --port 3000"
   },
   "dependencies": {
+    "aijah": "file:..",
     "react": "^19.2.4",
     "react-dom": "^19.2.4"
   },

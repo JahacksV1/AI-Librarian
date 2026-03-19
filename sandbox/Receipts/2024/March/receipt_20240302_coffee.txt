@@ -1,0 +1,3 @@
+(This is a text stand-in for a receipt image)
+Merchant: Morning Brew
+Total: 7.42

@@ -1,0 +1,4 @@
+Clips to organize by shoot date
+clip_a.mov
+clip_a_copy.mov
+clip_a_final.mov
