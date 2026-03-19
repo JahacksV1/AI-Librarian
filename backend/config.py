@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     # --- MCP ---
     mcp_mount_path: str = "/mcp"
 
+    # --- HTTP (optional; enables CORS when non-empty) ---
+    # Comma-separated origins, e.g. http://localhost:3000,http://127.0.0.1:3000
+    cors_origins: str = ""
+
     @property
     def effective_model_name(self) -> str:
         """Resolve the model name: explicit MODEL_NAME takes priority,

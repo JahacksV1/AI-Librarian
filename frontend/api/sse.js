@@ -1,3 +1,10 @@
+/**
+ * POST SSE: parse fetch Response streams (not EventSource).
+ * Contract: frames are "data: {json}\\n\\n" — see docs/FE_BE_INTEGRATION.md
+ *
+ * @param {Response} response
+ * @param {(data: Record<string, unknown>) => void} onEvent
+ */
 export async function readSSEStream(response, onEvent) {
   if (!response.body) throw new Error("No stream body.");
   const reader = response.body.getReader();
@@ -13,7 +20,10 @@ export async function readSSEStream(response, onEvent) {
     for (const part of parts) {
       const line = part.split("\n").find((l) => l.startsWith("data: "));
       if (!line) continue;
-      try { onEvent(JSON.parse(line.slice(6))); } catch (_) {}
+      try {
+        const data = JSON.parse(line.slice(6));
+        onEvent(data);
+      } catch (_) {}
     }
   }
 }

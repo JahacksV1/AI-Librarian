@@ -5,6 +5,7 @@ import sys
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from agent.loop import initialize_mcp_tool_cache
 from api.routes import router as api_router
@@ -60,6 +61,17 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+
+_cors = [o.strip() for o in settings.cors_origins.split(",") if o.strip()]
+if _cors:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
 app.include_router(api_router)
 app.mount("/mcp", mcp_http_app)
 

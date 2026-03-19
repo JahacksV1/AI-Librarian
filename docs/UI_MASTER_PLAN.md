@@ -3,6 +3,8 @@
 > This is the single canonical frontend spec. All previous UI docs have been deleted.
 > If it's not in this document, it's not in scope for Phase 1 frontend.
 
+**Wire contract (API paths, SSE, env):** see `docs/FE_BE_INTEGRATION.md` — stable across TS/React refactors.
+
 ---
 
 ## 1. What the UI must communicate
