@@ -12,9 +12,14 @@ services:
         condition: service_healthy
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE: /api
     ports:
       - "3003:80"
+    depends_on:
+      - backend
 
   postgres:
     image: postgres:16
