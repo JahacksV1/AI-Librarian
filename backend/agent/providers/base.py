@@ -1,17 +1,16 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-if TYPE_CHECKING:
-    from agent.loop import ChatTurnResult, EventCallback
+from agent.types import ChatTurnResult, EventCallback
 
 
 class ModelProvider(ABC):
     """Abstract base for all LLM providers.
 
     Every provider receives:
-    - messages: list of dicts in Ollama/OpenAI chat format (assembled by context.py).
+    - messages: list of dicts in OpenAI-compatible chat format (assembled by context.py).
     - tools: list of tool schemas in OpenAI function-call format (from MCP cache).
     - event_callback: async callable for streaming token SSE events to the frontend.
 

@@ -526,19 +526,39 @@ async def list_files(
 @router.get("/health")
 async def health() -> dict[str, Any]:
     db_status = "connected"
-    ollama_status = "reachable"
-
     try:
         await db_manager.healthcheck()
     except Exception:
         db_status = "disconnected"
 
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            response = await client.get(f"{settings.ollama_url.rstrip('/')}/api/tags")
-            response.raise_for_status()
-    except Exception:
-        ollama_status = "unreachable"
+    provider = settings.model_provider.lower()
+    model_status = "unknown"
 
-    overall_status = "ok" if db_status == "connected" and ollama_status == "reachable" else "degraded"
-    return {"status": overall_status, "db": db_status, "ollama": ollama_status}
+    if provider == "ollama":
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                response = await client.get(f"{settings.ollama_url.rstrip('/')}/api/tags")
+                response.raise_for_status()
+            model_status = "reachable"
+        except Exception:
+            model_status = "unreachable"
+    elif provider == "anthropic":
+        model_status = "configured" if settings.anthropic_api_key else "missing_api_key"
+    elif provider == "openai":
+        model_status = "configured" if settings.openai_api_key else "missing_api_key"
+
+    healthy = db_status == "connected" and model_status in ("reachable", "configured")
+    overall_status = "ok" if healthy else "degraded"
+
+    result: dict[str, Any] = {
+        "status": overall_status,
+        "db": db_status,
+        "model_provider": provider,
+        "model_name": settings.effective_model_name,
+        "model_status": model_status,
+    }
+
+    if provider == "ollama":
+        result["ollama"] = model_status
+
+    return result

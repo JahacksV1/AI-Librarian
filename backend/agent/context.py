@@ -157,7 +157,7 @@ def _format_active_plan(plan: Plan, actions: list[PlanAction]) -> str | None:
     return "\n".join(lines)
 
 
-def _session_message_to_ollama(message: SessionMessage) -> dict[str, Any]:
+def _session_message_to_dict(message: SessionMessage) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "role": message.role.value.lower(),
         "content": message.content,
@@ -188,7 +188,7 @@ class ContextPacket:
     active_plan_text: str | None = None
     conversation_messages: list[dict[str, Any]] = field(default_factory=list)
 
-    def to_ollama_messages(self) -> list[dict[str, Any]]:
+    def to_messages(self) -> list[dict[str, Any]]:
         messages: list[dict[str, Any]] = [{"role": "system", "content": self.system_prompt}]
 
         if self.policies_text:
@@ -295,5 +295,5 @@ async def assemble_context(session_id: str) -> ContextPacket:
         task_state_text=_format_task_state(task_state),
         recent_memories_text=_format_recent_memory_events(recent_events),
         active_plan_text=_format_active_plan(active_plan, active_plan_actions) if active_plan else None,
-        conversation_messages=[_session_message_to_ollama(message) for message in conversation_rows],
+        conversation_messages=[_session_message_to_dict(message) for message in conversation_rows],
     )

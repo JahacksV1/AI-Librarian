@@ -3,13 +3,19 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from dataclasses import dataclass
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from fastmcp import Client
 
 from agent.context import assemble_context
 from agent.providers import get_provider
+from agent.types import (
+    AgentLoopResult,
+    ChatTurnResult,
+    EventCallback,
+    ToolCall,
+    emit_event,
+)
 from config import settings
 from db.connection import db_manager
 from db.enums import RoleType, SSEEventType, SessionState
@@ -19,13 +25,12 @@ from mcp_server import mcp
 
 log = logging.getLogger(__name__)
 
-EventCallback = Callable[[dict[str, Any]], Awaitable[None]]
-
 MAX_TOOL_ITERATIONS = 10
 
 # --- Tool Dispatch Contract (see docs/TOOL_DISPATCH.md) ---
 # Parameters the agent loop injects from session context.
-# These are stripped from Ollama schemas and injected before MCP dispatch.
+# These are stripped from tool schemas before the LLM sees them,
+# then injected by the loop before MCP dispatch.
 SYSTEM_INJECTED_PARAMS = frozenset({"session_id"})
 TOOLS_REQUIRING_SESSION_ID = frozenset({
     "scan_folder",
@@ -33,29 +38,6 @@ TOOLS_REQUIRING_SESSION_ID = frozenset({
     "get_task_state",
     "update_task_state",
 })
-
-
-@dataclass(slots=True)
-class ToolCall:
-    id: str
-    name: str
-    arguments: dict[str, Any]
-
-
-@dataclass(slots=True)
-class ChatTurnResult:
-    content: str
-    tool_calls: list[ToolCall]
-
-
-@dataclass(slots=True)
-class AgentLoopResult:
-    session_id: str
-    assistant_message_id: str | None
-    final_content: str
-    iterations: int
-    tool_calls_executed: int
-    active_plan_id: str | None
 
 
 _TOOL_SCHEMAS_CACHE: list[dict[str, Any]] | None = None
@@ -70,7 +52,7 @@ def _get_mcp_client() -> Client:
     return _MCP_CLIENT
 
 
-def _tool_to_ollama_schema(tool: Any) -> dict[str, Any]:
+def _tool_to_function_schema(tool: Any) -> dict[str, Any]:
     name = getattr(tool, "name", "")
     description = getattr(tool, "description", "") or ""
     input_schema = getattr(tool, "inputSchema", None) or getattr(tool, "input_schema", None)
@@ -112,7 +94,7 @@ async def initialize_mcp_tool_cache() -> None:
         client = _get_mcp_client()
         async with client:
             tools = await client.list_tools()
-        _TOOL_SCHEMAS_CACHE = [_tool_to_ollama_schema(tool) for tool in tools]
+        _TOOL_SCHEMAS_CACHE = [_tool_to_function_schema(tool) for tool in tools]
 
 
 def get_cached_tool_schemas() -> list[dict[str, Any]]:
@@ -120,11 +102,6 @@ def get_cached_tool_schemas() -> list[dict[str, Any]]:
     if _TOOL_SCHEMAS_CACHE is None:
         raise RuntimeError("MCP tool cache is not initialized. Call initialize_mcp_tool_cache() first.")
     return list(_TOOL_SCHEMAS_CACHE)
-
-
-async def _emit_event(callback: EventCallback | None, payload: dict[str, Any]) -> None:
-    if callback is not None:
-        await callback(payload)
 
 
 async def _persist_message(
@@ -267,7 +244,7 @@ async def run_agent_loop(
     )
 
     context_packet = await assemble_context(session_id)
-    messages = context_packet.to_ollama_messages()
+    messages = context_packet.to_messages()
     tools = get_cached_tool_schemas()
 
     log.info(
@@ -297,7 +274,7 @@ async def run_agent_loop(
                     current_step=SessionState.ERROR.value,
                     scratchpad_summary=str(exc),
                 )
-                await _emit_event(
+                await emit_event(
                     event_callback,
                     {
                         "type": SSEEventType.ERROR.value,
@@ -337,7 +314,7 @@ async def run_agent_loop(
                 for tool_call in turn.tool_calls:
                     tool_calls_executed += 1
 
-                    await _emit_event(
+                    await emit_event(
                         event_callback,
                         {
                             "type": SSEEventType.TOOL_CALL.value,
@@ -367,7 +344,7 @@ async def run_agent_loop(
                             current_step=SessionState.ERROR.value,
                             scratchpad_summary=str(exc),
                         )
-                        await _emit_event(
+                        await emit_event(
                             event_callback,
                             {
                                 "type": SSEEventType.ERROR.value,
@@ -386,7 +363,7 @@ async def run_agent_loop(
                         },
                     )
 
-                    await _emit_event(
+                    await emit_event(
                         event_callback,
                         {
                             "type": SSEEventType.TOOL_RESULT.value,
@@ -397,7 +374,7 @@ async def run_agent_loop(
 
                     if tool_call.name == "propose_plan" and "plan_id" in result:
                         active_plan_id = result["plan_id"]
-                        await _emit_event(
+                        await emit_event(
                             event_callback,
                             {
                                 "type": SSEEventType.PLAN_CREATED.value,
@@ -427,7 +404,7 @@ async def run_agent_loop(
                 role=RoleType.ASSISTANT,
                 content=turn.content,
             )
-            await _emit_event(
+            await emit_event(
                 event_callback,
                 {
                     "type": SSEEventType.MESSAGE_COMPLETE.value,
@@ -456,7 +433,7 @@ async def run_agent_loop(
         role=RoleType.ASSISTANT,
         content=fallback_content,
     )
-    await _emit_event(
+    await emit_event(
         event_callback,
         {
             "type": SSEEventType.ERROR.value,

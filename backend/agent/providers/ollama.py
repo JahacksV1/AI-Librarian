@@ -6,6 +6,7 @@ from typing import Any
 import httpx
 
 from agent.providers.base import ModelProvider
+from agent.types import ChatTurnResult, EventCallback, ToolCall, emit_event
 from config import settings
 from db.enums import SSEEventType
 
@@ -14,7 +15,7 @@ class OllamaProvider(ModelProvider):
     """Local Ollama provider.
 
     Wire format: POST /api/chat with NDJSON streaming.
-    Messages and tool schemas use the OpenAI-compatible format natively —
+    Messages and tool schemas use the OpenAI-compatible format natively --
     no conversion needed since that's what context.py already produces.
     """
 
@@ -22,10 +23,8 @@ class OllamaProvider(ModelProvider):
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
-        event_callback,
-    ):
-        from agent.loop import ChatTurnResult, ToolCall, _emit_event
-
+        event_callback: EventCallback | None,
+    ) -> ChatTurnResult:
         url = f"{settings.ollama_url.rstrip('/')}/api/chat"
         payload = {
             "model": settings.effective_model_name,
@@ -52,12 +51,12 @@ class OllamaProvider(ModelProvider):
                     content = message_payload.get("content") or ""
                     if content:
                         content_chunks.append(content)
-                        await _emit_event(
+                        await emit_event(
                             event_callback,
                             {"type": SSEEventType.TOKEN.value, "token": content},
                         )
 
-                    chunk_tool_calls = _extract_tool_calls_from_ollama(message_payload)
+                    chunk_tool_calls = _extract_tool_calls(message_payload)
                     if chunk_tool_calls:
                         existing_ids = {tc.id for tc in accumulated_tool_calls}
                         for tc in chunk_tool_calls:
@@ -74,10 +73,8 @@ class OllamaProvider(ModelProvider):
         )
 
 
-def _extract_tool_calls_from_ollama(message_payload: dict[str, Any]) -> list:
+def _extract_tool_calls(message_payload: dict[str, Any]) -> list[ToolCall]:
     """Parse tool calls from an Ollama NDJSON message chunk."""
-    from agent.loop import ToolCall
-
     tool_calls: list[ToolCall] = []
 
     for index, tool_call in enumerate(message_payload.get("tool_calls") or []):

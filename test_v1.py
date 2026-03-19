@@ -29,8 +29,10 @@ TEST_USER_ID = "00000000-0000-0000-0000-000000000001"
 SCAN_PATH = "/sandbox"
 
 # How long to wait for the agent loop SSE stream to complete (seconds).
-# The model has to scan, plan, and respond — allow generous time.
-AGENT_TIMEOUT_SECONDS = 120
+# The model has to scan, plan, and respond across multiple LLM round-trips.
+# On CPU-only Ollama (qwen2.5 7B) a single round-trip can take 3-4 minutes
+# during the prefill phase when context is large, so we need a generous limit.
+AGENT_TIMEOUT_SECONDS = 600
 
 
 # ---------------------------------------------------------------------------
@@ -108,9 +110,26 @@ def step1_health(client: httpx.Client) -> None:
         _fail("DB not connected", str(body))
     _ok("DB connected")
 
-    if body.get("ollama") != "reachable":
-        _fail("Ollama not reachable", str(body))
-    _ok("Ollama reachable")
+    provider = str(body.get("model_provider", "")).lower()
+    model_name = str(body.get("model_name", ""))
+    model_status = str(body.get("model_status", ""))
+    print(f"  Provider: {provider or '(unknown)'}  model={model_name or '(unknown)'}  status={model_status or '(unknown)'}")
+
+    if provider == "ollama":
+        if model_status != "reachable":
+            _fail("Ollama model provider not reachable", str(body))
+        _ok("Ollama model provider reachable")
+
+        # Backward-compatible field: present only for ollama in /health
+        if body.get("ollama") != "reachable":
+            _fail("Legacy ollama health field not reachable", str(body))
+        _ok("Legacy ollama health field reachable")
+    elif provider in {"anthropic", "openai"}:
+        if model_status != "configured":
+            _fail(f"{provider} model provider not configured", str(body))
+        _ok(f"{provider} model provider configured")
+    else:
+        _fail("Unknown model provider in /health", str(body))
 
     if body.get("status") != "ok":
         _fail("Overall status not ok", str(body))
@@ -159,11 +178,18 @@ def step3_to_5_send_message(client: httpx.Client, session_id: str) -> tuple[str,
     print(f"  Sending: 'Please scan my sandbox folder and suggest how to organize it.'")
     print(f"  (Waiting up to {AGENT_TIMEOUT_SECONDS}s for model response...)")
 
+    sse_timeout = httpx.Timeout(
+        connect=30.0,
+        read=AGENT_TIMEOUT_SECONDS,
+        write=30.0,
+        pool=30.0,
+    )
+
     with client.stream(
         "POST",
         f"{BASE_URL}/sessions/{session_id}/messages",
         json={"content": "Please scan my sandbox folder and suggest how to organize it."},
-        timeout=AGENT_TIMEOUT_SECONDS,
+        timeout=sse_timeout,
     ) as response:
         if response.status_code != 200:
             _fail("POST /messages returned non-200", f"status={response.status_code}")
@@ -468,7 +494,7 @@ def main() -> None:
             passed += 3  # covers steps 3, 4, 5
         except StepFailed as e:
             print(f"\nStopped at Steps 3-5: {e}")
-            print("\nThis is likely the FastMCP or Ollama integration point.")
+            print("\nThis is likely the FastMCP or model-provider integration point.")
             print("Check: docker logs aijah-backend-1")
             sys.exit(1)
 

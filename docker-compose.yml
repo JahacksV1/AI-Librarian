@@ -10,8 +10,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      ollama:
-        condition: service_healthy
 
   frontend:
     build: ./frontend
@@ -35,7 +33,11 @@ services:
       timeout: 3s
       retries: 5
 
+  # Ollama is only needed when MODEL_PROVIDER=ollama.
+  # Start with:  docker compose --profile local up
+  # Cloud providers (anthropic, openai) don't need this service.
   ollama:
+    profiles: ["local"]
     image: ollama/ollama
     ports:
       - "11434:11434"
@@ -44,7 +46,6 @@ services:
     mem_limit: 8g
     mem_reservation: 4g
     healthcheck:
-      # ollama/ollama image has no curl; use ollama list to check server is ready
       test: ["CMD-SHELL", "ollama list 2>/dev/null || exit 1"]
       interval: 10s
       timeout: 5s
