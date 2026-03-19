@@ -1,0 +1,8 @@
+INVOICE #2024-003
+Date: March 22, 2024
+Client: Acme Corp
+
+March retainer: $3,500.00
+Additional research hours (4 hrs): $1,000.00
+
+Total: $4,500.00

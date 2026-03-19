@@ -23,6 +23,7 @@ from db.models import (
     Session,
     TaskState,
 )
+from db.utils import recompute_plan_status
 from safety.sandbox import sandbox_service
 
 
@@ -56,24 +57,6 @@ def _event_type_for_action(action_type: ActionType) -> EventType:
         ActionType.CREATE_FOLDER: EventType.PLAN,
     }
     return mapping[action_type]
-
-
-async def _recompute_plan_status(session, plan_id: uuid.UUID) -> PlanStatus:
-    await session.flush()
-    actions = list(
-        await session.scalars(select(PlanAction).where(PlanAction.plan_id == plan_id))
-    )
-    statuses = {action.status for action in actions}
-
-    if statuses and statuses == {ActionStatus.REJECTED}:
-        return PlanStatus.REJECTED
-    if statuses and all(status == ActionStatus.EXECUTED for status in statuses):
-        return PlanStatus.EXECUTED
-    if ActionStatus.FAILED in statuses or ActionStatus.REJECTED in statuses or ActionStatus.SKIPPED in statuses:
-        return PlanStatus.PARTIAL
-    if ActionStatus.APPROVED in statuses or ActionStatus.EXECUTED in statuses:
-        return PlanStatus.APPROVED
-    return PlanStatus.PENDING
 
 
 async def _update_entity_after_execution(
@@ -171,15 +154,48 @@ async def execute_action(action_id: str) -> dict:
         pre_state: dict | None = None
 
         try:
+            # Validate required payload keys upfront — give a clean error rather than KeyError.
+            if action.action_type in {ActionType.RENAME, ActionType.MOVE, ActionType.ARCHIVE}:
+                if not payload.get("from_path"):
+                    raise ValueError(
+                        f"Action payload missing 'from_path' for {action.action_type.value}. "
+                        "The model must include from_path in action_payload."
+                    )
+            if action.action_type in {ActionType.RENAME, ActionType.MOVE}:
+                if not payload.get("to_path"):
+                    raise ValueError(
+                        f"Action payload missing 'to_path' for {action.action_type.value}. "
+                        "The model must include to_path in action_payload."
+                    )
+            if action.action_type == ActionType.CREATE_FOLDER:
+                if not payload.get("path"):
+                    raise ValueError(
+                        "Action payload missing 'path' for CREATE_FOLDER. "
+                        "The model must include path in action_payload."
+                    )
+
             if action.action_type in {ActionType.RENAME, ActionType.MOVE, ActionType.ARCHIVE}:
                 source_path = sandbox_service.resolve_path(payload["from_path"])
                 if not source_path.exists():
                     raise FileNotFoundError(f"Source path does not exist: {source_path}")
+                # Validate that file-only operations aren't applied to directories
+                if action.action_type == ActionType.RENAME and source_path.is_dir():
+                    raise ValueError(
+                        f"RENAME cannot be applied to a directory: {source_path}. "
+                        "Use MOVE for folders."
+                    )
                 pre_state = _path_state(source_path)
 
             if action.action_type in {ActionType.RENAME, ActionType.MOVE}:
                 destination_path = sandbox_service.resolve_path(payload["to_path"])
                 pre_state = pre_state or _path_state(destination_path)
+                # Guard: don't move a directory to a path that looks like a file (has an extension)
+                if source_path is not None and source_path.is_dir() and destination_path.suffix:
+                    raise ValueError(
+                        f"Cannot move directory {source_path} to {destination_path}: "
+                        "destination has a file extension, which would corrupt the folder structure. "
+                        "Use a destination path without an extension for folder moves."
+                    )
                 if destination_path.exists():
                     raise FileExistsError(f"Destination already exists: {destination_path}")
                 sandbox_service.move_path(source_path, destination_path)
@@ -235,7 +251,7 @@ async def execute_action(action_id: str) -> dict:
             )
             session.add(memory_event)
 
-            plan.status = await _recompute_plan_status(session, plan.id)
+            plan.status = await recompute_plan_status(session, plan.id)
             if task_state is not None:
                 task_state.current_step = (
                     SessionState.COMPLETE.value
@@ -277,7 +293,7 @@ async def execute_action(action_id: str) -> dict:
             )
             session.add(failure_event)
 
-            plan.status = await _recompute_plan_status(session, plan.id)
+            plan.status = await recompute_plan_status(session, plan.id)
             if task_state is not None:
                 task_state.current_step = SessionState.ERROR.value
 

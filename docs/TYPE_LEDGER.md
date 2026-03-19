@@ -254,6 +254,20 @@ How a preference or relationship was established in `user_preferences.source` an
 
 ---
 
+### ModelProviderType
+Which LLM provider the backend uses for the agent loop. Used in config validation only (Phase 1.5). Not stored in the database.
+
+| Value | Meaning |
+|---|---|
+| `OLLAMA` | Local model via Ollama runtime (default) |
+| `ANTHROPIC` | Claude models via Anthropic API |
+| `OPENAI` | GPT models via OpenAI API |
+
+Defined in: `backend/db/enums.py`
+Read from: `MODEL_PROVIDER` in `.env` / `config.py`
+
+---
+
 ### EnvironmentType
 Type of environment in `environment_actions.environment_type` **(Phase 3 — table and tools do not exist until Phase 3)**.
 

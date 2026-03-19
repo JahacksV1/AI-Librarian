@@ -117,6 +117,15 @@ class SourceType(str, Enum):
     APPROVED = "APPROVED"
 
 
+# --- Model provider types (Phase 1.5 — config only, not stored in DB) ---
+
+class ModelProviderType(str, Enum):
+    """Which LLM provider the backend uses for the agent loop."""
+    OLLAMA = "OLLAMA"
+    ANTHROPIC = "ANTHROPIC"
+    OPENAI = "OPENAI"
+
+
 # --- Phase 2 enums (defined here for reference, not used in Phase 1 DB) ---
 
 class EntityType(str, Enum):

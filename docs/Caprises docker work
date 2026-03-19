@@ -204,6 +204,81 @@ CLEANUP ITEMS
 
 ---
 
+PHASE 1.5 — DOCKER CHANGES FOR MODEL PROVIDERS (NEW)
+
+Why this is needed:
+  We added a model provider abstraction so the backend can use Ollama (local),
+  Anthropic (Claude), or OpenAI (GPT-4o). When using a cloud provider like Claude,
+  the Ollama container is unnecessary and wastes 4–8 GB of RAM sitting idle.
+  We want to make Ollama optional — only start it when you actually need local models.
+
+What changed in the backend:
+  - New config field: MODEL_PROVIDER (values: ollama, anthropic, openai)
+  - New config fields: ANTHROPIC_API_KEY, OPENAI_API_KEY (only needed for cloud providers)
+  - New files in backend/agent/providers/ — one per LLM provider
+  - The backend no longer hardcodes Ollama — it reads MODEL_PROVIDER and uses the right provider
+
+What needs to change in docker-compose.yml:
+
+  1. Add a Docker Compose profile to the ollama service
+     This makes Ollama only start when explicitly requested.
+
+     Change the ollama service to include:
+       profiles: ["local"]
+
+     Before:
+       ollama:
+         image: ollama/ollama
+         ports:
+           - "11434:11434"
+         ...
+
+     After:
+       ollama:
+         image: ollama/ollama
+         profiles: ["local"]
+         ports:
+           - "11434:11434"
+         ...
+
+  2. Remove ollama from backend's depends_on
+     The backend should start without waiting for Ollama when using a cloud provider.
+
+     Before:
+       backend:
+         depends_on:
+           postgres:
+             condition: service_healthy
+           ollama:
+             condition: service_healthy
+
+     After:
+       backend:
+         depends_on:
+           postgres:
+             condition: service_healthy
+
+  3. Usage after the change:
+
+     Using a cloud provider (Claude or GPT-4o):
+       - Set MODEL_PROVIDER=anthropic (or openai) in .env
+       - Set ANTHROPIC_API_KEY=sk-... (or OPENAI_API_KEY=sk-...) in .env
+       - Run: docker compose up
+       - Ollama does NOT start. Saves 4–8 GB of RAM.
+
+     Using Ollama (local model):
+       - Set MODEL_PROVIDER=ollama in .env
+       - Run: docker compose --profile local up
+       - Ollama starts alongside everything else, same as before.
+
+  4. No other Docker changes needed
+     - Postgres stays the same
+     - Frontend stays the same
+     - Backend Dockerfile stays the same (the provider code is already in the backend image)
+     - .env already has the new fields documented in .env.example
+
+---
+
 NOTES
 
 - Layer 1 = Phase 1 = "The Body" — Docker + DB + basic stack

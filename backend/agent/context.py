@@ -10,18 +10,42 @@ from typing import Any
 
 from sqlalchemy import select
 
+from config import settings
 from db.connection import db_manager
-from db.models import OperationalPolicy, Session, SessionMessage, TaskState, UserPreference
+from db.models import (
+    MemoryEvent,
+    OperationalPolicy,
+    Plan,
+    PlanAction,
+    Session,
+    SessionMessage,
+    TaskState,
+    UserPreference,
+)
 
-SYSTEM_PROMPT = """You are AIJAH, a local file assistant. Your job is to help the user organize their files safely.
+SYSTEM_PROMPT = f"""You are AIJAH, a local file assistant. Your job is to help the user organize their files safely.
+
+The sandbox root path is: {settings.sandbox_root}
+All file paths you use in tool calls must be absolute paths starting with {settings.sandbox_root}.
 
 Rules you must always follow:
 - Never perform file operations without a plan being proposed and approved first.
-- Always call propose_plan before suggesting any rename, move, or archive action.
+- Always call scan_folder first to discover the current state of files, then call propose_plan with the results.
 - Never delete files. Use archive instead.
-- Only operate within the sandbox root path.
+- Only operate within the sandbox root path ({settings.sandbox_root}).
 - If you are unsure about a file's purpose, ask the user before including it in a plan.
-- When you propose a plan, explain your reasoning clearly so the user can make an informed decision."""
+- When you propose a plan, explain your reasoning clearly so the user can make an informed decision.
+
+Rules about avoiding redundant or incorrect plans:
+- Before calling propose_plan, review the "Recently executed actions" section below (if present).
+  Do NOT propose moving or renaming a file that has already been successfully moved or renamed in this session.
+- If a file's canonical path already indicates it is in an organized location (e.g. it contains a subfolder
+  like "organized/"), verify whether it actually needs to move before including it in a plan.
+- If the task state shows current_step = "AWAITING_APPROVAL", a plan is already pending.
+  Do NOT call propose_plan again. Instead, tell the user a plan exists and ask if they want to proceed.
+- Do not create CREATE_FOLDER actions for folders that already appear in the scan results.
+- If scan_folder returns no files that need organizing, tell the user rather than generating an empty or
+  trivially wrong plan."""
 
 
 def _json_default(value: Any) -> Any:
@@ -84,6 +108,55 @@ def _format_task_state(task_state: TaskState | None) -> str | None:
     )
 
 
+def _format_recent_memory_events(events: list[MemoryEvent]) -> str | None:
+    if not events:
+        return None
+
+    lines = ["Recently executed actions in this session (do not repeat these):"]
+    for event in events:
+        action_type = event.action_taken_json.get("action_type", "?") if event.action_taken_json else "?"
+        outcome = event.outcome.value if event.outcome else "?"
+
+        pre_path = None
+        post_path = None
+        if event.pre_state_json and isinstance(event.pre_state_json, dict):
+            pre_path = event.pre_state_json.get("path")
+        if event.post_state_json and isinstance(event.post_state_json, dict):
+            post_path = event.post_state_json.get("path")
+
+        if pre_path and post_path and pre_path != post_path:
+            lines.append(f"- {action_type}: {pre_path} → {post_path} ({outcome})")
+        elif pre_path:
+            lines.append(f"- {action_type}: {pre_path} ({outcome})")
+        else:
+            change = json.dumps(event.intended_change_json, default=_json_default) if event.intended_change_json else "{}"
+            lines.append(f"- {action_type}: {change} ({outcome})")
+
+    return "\n".join(lines)
+
+
+def _format_active_plan(plan: Plan, actions: list[PlanAction]) -> str | None:
+    if plan is None:
+        return None
+
+    lines = [
+        f"Active plan (status={plan.status.value}, id={plan.id}):",
+        f"  Goal: {plan.goal}",
+        f"  Rationale: {plan.rationale_summary}",
+        f"  Actions ({len(actions)}):",
+    ]
+    for action in actions:
+        payload = action.action_payload_json or {}
+        from_path = payload.get("from_path", payload.get("path", "?"))
+        to_path = payload.get("to_path")
+        if to_path:
+            lines.append(f"    [{action.status.value}] {action.action_type.value}: {from_path} → {to_path}")
+        else:
+            lines.append(f"    [{action.status.value}] {action.action_type.value}: {from_path}")
+
+    return "\n".join(lines)
+
+
 def _session_message_to_ollama(message: SessionMessage) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "role": message.role.value.lower(),
@@ -92,6 +165,9 @@ def _session_message_to_ollama(message: SessionMessage) -> dict[str, Any]:
 
     if message.tool_name:
         payload["name"] = message.tool_name
+
+    if message.tool_call_id:
+        payload["tool_call_id"] = message.tool_call_id
 
     if message.metadata_json:
         payload["metadata"] = message.metadata_json
@@ -108,6 +184,8 @@ class ContextPacket:
     policies_text: str | None = None
     preferences_text: str | None = None
     task_state_text: str | None = None
+    recent_memories_text: str | None = None
+    active_plan_text: str | None = None
     conversation_messages: list[dict[str, Any]] = field(default_factory=list)
 
     def to_ollama_messages(self) -> list[dict[str, Any]]:
@@ -122,6 +200,12 @@ class ContextPacket:
         if self.task_state_text:
             messages.append({"role": "system", "content": self.task_state_text})
 
+        if self.recent_memories_text:
+            messages.append({"role": "system", "content": self.recent_memories_text})
+
+        if self.active_plan_text:
+            messages.append({"role": "system", "content": self.active_plan_text})
+
         messages.extend(self.conversation_messages)
         return messages
 
@@ -134,6 +218,8 @@ class ContextPacket:
             "has_policies": self.policies_text is not None,
             "has_preferences": self.preferences_text is not None,
             "has_task_state": self.task_state_text is not None,
+            "has_recent_memories": self.recent_memories_text is not None,
+            "has_active_plan": self.active_plan_text is not None,
         }
 
 
@@ -173,6 +259,32 @@ async def assemble_context(session_id: str) -> ContextPacket:
             )
         )
 
+        # Recent memory events — last 10 for this session, most recent first
+        recent_events = list(
+            await session.scalars(
+                select(MemoryEvent)
+                .where(MemoryEvent.session_id == session_uuid)
+                .order_by(MemoryEvent.created_at.desc())
+                .limit(10)
+            )
+        )
+        # Reverse so they read chronologically in the prompt
+        recent_events = list(reversed(recent_events))
+
+        # Active plan with actions (only if a plan is currently pending or partially executed)
+        active_plan: Plan | None = None
+        active_plan_actions: list[PlanAction] = []
+        if task_state is not None and task_state.active_plan_id is not None:
+            active_plan = await session.get(Plan, task_state.active_plan_id)
+            if active_plan is not None:
+                active_plan_actions = list(
+                    await session.scalars(
+                        select(PlanAction)
+                        .where(PlanAction.plan_id == active_plan.id)
+                        .order_by(PlanAction.created_at.asc())
+                    )
+                )
+
     return ContextPacket(
         session_id=str(session_row.id),
         user_id=str(session_row.user_id),
@@ -181,5 +293,7 @@ async def assemble_context(session_id: str) -> ContextPacket:
         policies_text=_format_policies(policies),
         preferences_text=_format_preferences(preferences),
         task_state_text=_format_task_state(task_state),
+        recent_memories_text=_format_recent_memory_events(recent_events),
+        active_plan_text=_format_active_plan(active_plan, active_plan_actions) if active_plan else None,
         conversation_messages=[_session_message_to_ollama(message) for message in conversation_rows],
     )

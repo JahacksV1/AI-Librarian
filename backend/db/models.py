@@ -111,7 +111,7 @@ class Device(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     os: Mapped[str | None] = mapped_column(Text)
     local_agent_version: Mapped[str | None] = mapped_column(Text)
 
-    user: Mapped["User"] = relationship(back_populates="devices")
+    user: Mapped[User] = relationship(back_populates="devices")
     sessions: Mapped[list["Session"]] = relationship(back_populates="device")
     file_entities: Mapped[list["FileEntity"]] = relationship(back_populates="device")
     folder_entities: Mapped[list["FolderEntity"]] = relationship(back_populates="device")
@@ -152,12 +152,12 @@ class Session(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     summary: Mapped[str | None] = mapped_column(Text)
 
-    user: Mapped["User"] = relationship(back_populates="sessions")
-    device: Mapped["Device | None"] = relationship(back_populates="sessions")
-    messages: Mapped[list["SessionMessage"]] = relationship(back_populates="session")
-    task_state: Mapped["TaskState | None"] = relationship(back_populates="session")
-    plans: Mapped[list["Plan"]] = relationship(back_populates="session")
-    memory_events: Mapped[list["MemoryEvent"]] = relationship(back_populates="session")
+    user: Mapped[User] = relationship(back_populates="sessions")
+    device: Mapped[Device | None] = relationship(back_populates="sessions")
+    messages: Mapped[list[SessionMessage]] = relationship(back_populates="session")
+    task_state: Mapped[TaskState | None] = relationship(back_populates="session")
+    plans: Mapped[list[Plan]] = relationship(back_populates="session")
+    memory_events: Mapped[list[MemoryEvent]] = relationship(back_populates="session")
 
 
 class SessionMessage(UUIDPrimaryKeyMixin, Base):
@@ -179,7 +179,7 @@ class SessionMessage(UUIDPrimaryKeyMixin, Base):
         server_default=func.now(),
     )
 
-    session: Mapped["Session"] = relationship(back_populates="messages")
+    session: Mapped[Session] = relationship(back_populates="messages")
 
 
 class Plan(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -208,9 +208,9 @@ class Plan(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         server_default=text("'DRAFT'"),
     )
 
-    session: Mapped["Session"] = relationship(back_populates="plans")
-    actions: Mapped[list["PlanAction"]] = relationship(back_populates="plan")
-    task_states: Mapped[list["TaskState"]] = relationship(back_populates="active_plan")
+    session: Mapped[Session] = relationship(back_populates="plans")
+    actions: Mapped[list[PlanAction]] = relationship(back_populates="plan")
+    task_states: Mapped[list[TaskState]] = relationship(back_populates="active_plan")
 
 
 class TaskState(UUIDPrimaryKeyMixin, Base):
@@ -240,8 +240,8 @@ class TaskState(UUIDPrimaryKeyMixin, Base):
         onupdate=func.now(),
     )
 
-    session: Mapped["Session"] = relationship(back_populates="task_state")
-    active_plan: Mapped["Plan | None"] = relationship(back_populates="task_states")
+    session: Mapped[Session] = relationship(back_populates="task_state")
+    active_plan: Mapped[Plan | None] = relationship(back_populates="task_states")
 
 
 class FileEntity(UUIDPrimaryKeyMixin, Base):
@@ -275,7 +275,7 @@ class FileEntity(UUIDPrimaryKeyMixin, Base):
     exists_now: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
     metadata_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
 
-    device: Mapped["Device"] = relationship(back_populates="file_entities")
+    device: Mapped[Device] = relationship(back_populates="file_entities")
 
 
 class FolderEntity(UUIDPrimaryKeyMixin, Base):
@@ -304,7 +304,7 @@ class FolderEntity(UUIDPrimaryKeyMixin, Base):
     exists_now: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
     metadata_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
 
-    device: Mapped["Device"] = relationship(back_populates="folder_entities")
+    device: Mapped[Device] = relationship(back_populates="folder_entities")
 
 
 class PlanAction(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -335,7 +335,7 @@ class PlanAction(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     result_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
 
-    plan: Mapped["Plan"] = relationship(back_populates="actions")
+    plan: Mapped[Plan] = relationship(back_populates="actions")
 
 
 class MemoryEvent(UUIDPrimaryKeyMixin, Base):
@@ -375,9 +375,9 @@ class MemoryEvent(UUIDPrimaryKeyMixin, Base):
         server_default=func.now(),
     )
 
-    user: Mapped["User"] = relationship(back_populates="memory_events")
-    device: Mapped["Device | None"] = relationship(back_populates="memory_events")
-    session: Mapped["Session | None"] = relationship(back_populates="memory_events")
+    user: Mapped[User] = relationship(back_populates="memory_events")
+    device: Mapped[Device | None] = relationship(back_populates="memory_events")
+    session: Mapped[Session | None] = relationship(back_populates="memory_events")
 
 
 class UserPreference(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -401,7 +401,7 @@ class UserPreference(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     source: Mapped[SourceType] = mapped_column(source_type_enum, nullable=False)
 
-    user: Mapped["User"] = relationship(back_populates="preferences")
+    user: Mapped[User] = relationship(back_populates="preferences")
 
 
 class OperationalPolicy(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -426,4 +426,4 @@ class OperationalPolicy(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         server_default=text("true"),
     )
 
-    user: Mapped["User"] = relationship(back_populates="policies")
+    user: Mapped[User] = relationship(back_populates="policies")

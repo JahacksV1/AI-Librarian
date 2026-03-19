@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -11,13 +11,13 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
-from agent.loop import run_agent_loop
+from agent.loop import _get_mcp_client, run_agent_loop
 from api.sse import action_executed_event, error_event, execution_complete_event, from_payload
 from config import settings
 from db.connection import db_manager
 from db.enums import ActionStatus, PlanStatus, SessionMode, SessionState, SessionStatus
 from db.models import Device, FileEntity, Plan, PlanAction, Session, SessionMessage, TaskState
-from tools.execute_action import execute_action
+from db.utils import recompute_plan_status
 from tools.scan_folder import scan_folder
 
 router = APIRouter()
@@ -108,24 +108,6 @@ def _plan_payload(plan: Plan, actions: list[PlanAction] | None = None) -> dict[s
         payload["actions"] = [_action_payload(action) for action in actions]
     return payload
 
-
-async def _recompute_plan_status(session, plan_id: uuid.UUID) -> PlanStatus:
-    actions = list(
-        await session.scalars(select(PlanAction).where(PlanAction.plan_id == plan_id))
-    )
-    statuses = {action.status for action in actions}
-
-    if statuses and statuses == {ActionStatus.REJECTED}:
-        return PlanStatus.REJECTED
-    if statuses and statuses == {ActionStatus.EXECUTED}:
-        return PlanStatus.EXECUTED
-    if ActionStatus.FAILED in statuses or ActionStatus.SKIPPED in statuses:
-        return PlanStatus.PARTIAL
-    if ActionStatus.REJECTED in statuses and ActionStatus.EXECUTED in statuses:
-        return PlanStatus.PARTIAL
-    if statuses and statuses.issubset({ActionStatus.APPROVED}):
-        return PlanStatus.APPROVED
-    return PlanStatus.PENDING
 
 
 def _validate_action_update_status(status_value: ActionStatus) -> None:
@@ -219,7 +201,7 @@ async def patch_session(session_id: str, body: UpdateSessionRequest) -> dict[str
         if body.status is not None:
             session_row.status = body.status
             if body.status in {SessionStatus.COMPLETED, SessionStatus.FAILED}:
-                session_row.ended_at = datetime.utcnow()
+                session_row.ended_at = datetime.now(timezone.utc)
         if body.title is not None:
             session_row.title = body.title
 
@@ -361,7 +343,7 @@ async def patch_action(action_id: str, body: UpdateActionRequest) -> dict[str, A
         plan_row = await session.get(Plan, action_row.plan_id)
         if plan_row is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Plan not found for action.")
-        plan_row.status = await _recompute_plan_status(session, plan_row.id)
+        plan_row.status = await recompute_plan_status(session, plan_row.id)
 
         await session.commit()
         await session.refresh(action_row)
@@ -397,7 +379,7 @@ async def approve_all_plan_actions(plan_id: str) -> dict[str, Any]:
         for action in pending_actions:
             action.status = ActionStatus.APPROVED
 
-        plan_row.status = await _recompute_plan_status(session, plan_row.id)
+        plan_row.status = await recompute_plan_status(session, plan_row.id)
         await session.commit()
 
     return {"approved_count": len(pending_actions), "plan_id": str(plan_uuid)}
@@ -439,7 +421,19 @@ async def execute_plan(plan_id: str) -> StreamingResponse:
             return
 
         for action in approved_actions:
-            result = await execute_action(str(action.id))
+            mcp_client = _get_mcp_client()
+            async with mcp_client:
+                call_result = await mcp_client.call_tool(
+                    "execute_action",
+                    arguments={"action_id": str(action.id)},
+                )
+            # Unwrap FastMCP result envelope
+            if hasattr(call_result, "data") and isinstance(call_result.data, dict):
+                result = call_result.data
+            elif isinstance(call_result, dict):
+                result = call_result
+            else:
+                result = {"outcome": "FAILED", "error": str(call_result)}
             outcome = str(result.get("outcome", "FAILED"))
             if outcome == "SUCCESS":
                 succeeded += 1
@@ -483,7 +477,7 @@ async def scan_filesystem(body: ScanRequest) -> dict[str, Any]:
         "files_found": len(result.get("files", [])),
         "folders_found": len(result.get("folders", [])),
         "session_id": body.session_id,
-        "scan_completed_at": datetime.utcnow().isoformat(),
+        "scan_completed_at": datetime.now(timezone.utc).isoformat(),
     }
 
 

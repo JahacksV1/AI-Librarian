@@ -1,0 +1,10 @@
+Q1 2024 EXPENSE SUMMARY
+
+Category          Amount
+---------         ------
+Office supplies   $340.00
+Software licenses $1,200.00
+Travel            $890.00
+Client meals      $420.00
+
+Total Q1:         $2,850.00

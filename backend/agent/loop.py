@@ -6,10 +6,10 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
-import httpx
 from fastmcp import Client
 
 from agent.context import assemble_context
+from agent.providers import get_provider
 from config import settings
 from db.connection import db_manager
 from db.enums import RoleType, SSEEventType, SessionState
@@ -22,6 +22,17 @@ log = logging.getLogger(__name__)
 EventCallback = Callable[[dict[str, Any]], Awaitable[None]]
 
 MAX_TOOL_ITERATIONS = 10
+
+# --- Tool Dispatch Contract (see docs/TOOL_DISPATCH.md) ---
+# Parameters the agent loop injects from session context.
+# These are stripped from Ollama schemas and injected before MCP dispatch.
+SYSTEM_INJECTED_PARAMS = frozenset({"session_id"})
+TOOLS_REQUIRING_SESSION_ID = frozenset({
+    "scan_folder",
+    "propose_plan",
+    "get_task_state",
+    "update_task_state",
+})
 
 
 @dataclass(slots=True)
@@ -72,12 +83,25 @@ def _tool_to_ollama_schema(tool: Any) -> dict[str, Any]:
     if "required" not in input_schema:
         input_schema["required"] = []
 
+    filtered_props = {
+        k: v for k, v in input_schema["properties"].items()
+        if k not in SYSTEM_INJECTED_PARAMS
+    }
+    filtered_required = [
+        r for r in input_schema["required"]
+        if r not in SYSTEM_INJECTED_PARAMS
+    ]
+
     return {
         "type": "function",
         "function": {
             "name": name,
             "description": description,
-            "parameters": input_schema,
+            "parameters": {
+                "type": "object",
+                "properties": filtered_props,
+                "required": filtered_required,
+            },
         },
     }
 
@@ -162,84 +186,6 @@ def _tool_result_message(tool_call: ToolCall, result: dict[str, Any]) -> dict[st
         "tool_call_id": tool_call.id,
         "content": _serialize_tool_result(result),
     }
-
-
-def _extract_tool_calls(message_payload: dict[str, Any]) -> list[ToolCall]:
-    tool_calls: list[ToolCall] = []
-
-    for index, tool_call in enumerate(message_payload.get("tool_calls") or []):
-        function = tool_call.get("function") or {}
-        arguments = function.get("arguments") or {}
-        if isinstance(arguments, str):
-            try:
-                arguments = json.loads(arguments)
-            except json.JSONDecodeError:
-                arguments = {}
-
-        tool_calls.append(
-            ToolCall(
-                id=tool_call.get("id") or f"tool-call-{index}",
-                name=function.get("name", ""),
-                arguments=arguments,
-            )
-        )
-
-    return [tool_call for tool_call in tool_calls if tool_call.name]
-
-
-async def _run_ollama_chat(
-    *,
-    messages: list[dict[str, Any]],
-    tools: list[dict[str, Any]],
-    event_callback: EventCallback | None,
-) -> ChatTurnResult:
-    url = f"{settings.ollama_url.rstrip('/')}/api/chat"
-    payload = {
-        "model": settings.ollama_model,
-        "messages": messages,
-        "tools": tools,
-        "stream": True,
-    }
-
-    content_chunks: list[str] = []
-    accumulated_tool_calls: list[ToolCall] = []
-
-    timeout = httpx.Timeout(connect=10.0, read=None, write=30.0, pool=30.0)
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        async with client.stream("POST", url, json=payload) as response:
-            response.raise_for_status()
-
-            async for line in response.aiter_lines():
-                if not line:
-                    continue
-
-                chunk = json.loads(line)
-                message_payload = chunk.get("message") or {}
-
-                content = message_payload.get("content") or ""
-                if content:
-                    content_chunks.append(content)
-                    await _emit_event(
-                        event_callback,
-                        {"type": SSEEventType.TOKEN.value, "token": content},
-                    )
-
-                chunk_tool_calls = _extract_tool_calls(message_payload)
-                if chunk_tool_calls:
-                    existing_ids = {tool_call.id for tool_call in accumulated_tool_calls}
-                    for tool_call in chunk_tool_calls:
-                        if tool_call.id in existing_ids:
-                            continue
-                        accumulated_tool_calls.append(tool_call)
-                        existing_ids.add(tool_call.id)
-
-                if chunk.get("done"):
-                    break
-
-    return ChatTurnResult(
-        content="".join(content_chunks),
-        tool_calls=accumulated_tool_calls,
-    )
 
 
 async def _update_state_for_tool_start(session_id: str, tool_name: str) -> None:
@@ -334,11 +280,13 @@ async def run_agent_loop(
         },
     )
 
+    provider = get_provider()
+
     client = _get_mcp_client()
     async with client:
         for iteration in range(1, MAX_TOOL_ITERATIONS + 1):
             try:
-                turn = await _run_ollama_chat(
+                turn = await provider.chat_stream(
                     messages=messages,
                     tools=tools,
                     event_callback=event_callback,
@@ -353,7 +301,7 @@ async def run_agent_loop(
                     event_callback,
                     {
                         "type": SSEEventType.ERROR.value,
-                        "message": "Ollama call failed",
+                        "message": "Model call failed",
                         "detail": str(exc),
                     },
                 )
@@ -403,9 +351,12 @@ async def run_agent_loop(
                         extra={
                             "session_id": session_id,
                             "tool": tool_call.name,
-                            "args": tool_call.arguments,
+                            "tool_args": tool_call.arguments,
                         },
                     )
+
+                    if tool_call.name in TOOLS_REQUIRING_SESSION_ID:
+                        tool_call.arguments["session_id"] = session_id
 
                     await _update_state_for_tool_start(session_id, tool_call.name)
                     try:

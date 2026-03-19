@@ -1,0 +1,10 @@
+INVOICE #2024-001
+Date: January 15, 2024
+Bill To: Acme Corp, 123 Main St
+
+Services Rendered:
+- Legal consultation (5 hrs @ $250/hr): $1,250.00
+- Document review (3 hrs @ $250/hr): $750.00
+
+Total Due: $2,000.00
+Payment Terms: Net 30

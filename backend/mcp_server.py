@@ -41,7 +41,18 @@ async def read_file_metadata_tool(path: str) -> dict[str, Any]:
 
 @mcp.tool(
     name="propose_plan",
-    description="Write a proposed plan and its actions to the database, then return the new plan ID.",
+    description=(
+        "Create a file reorganization plan. Call this AFTER scan_folder. "
+        "Each action in the actions list must be a dict with these keys: "
+        "action_type (one of: RENAME, MOVE, CREATE_FOLDER, ARCHIVE, CLASSIFY), "
+        "target_type ('file' or 'folder'), "
+        "target_path (absolute path of the target), "
+        "action_payload (dict with operation-specific fields: "
+        "RENAME/MOVE need 'from_path' and 'to_path'; "
+        "CREATE_FOLDER needs 'path'; "
+        "ARCHIVE needs 'from_path'). "
+        "All paths must be absolute and inside the sandbox root."
+    ),
 )
 async def propose_plan_tool(
     session_id: str,

@@ -1,0 +1,9 @@
+INVOICE #2024-002
+Date: February 3, 2024
+Bill To: Riverside Holdings LLC
+
+Services:
+- Contract drafting: $1,800.00
+- Client meeting (2 hrs): $500.00
+
+Total Due: $2,300.00

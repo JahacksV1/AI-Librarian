@@ -5,10 +5,8 @@ services:
       - "8000:8000"
     volumes:
       - ./sandbox:/sandbox
-    environment:
-      - SANDBOX_ROOT=/sandbox
-      - DATABASE_URL=postgresql+asyncpg://aijah:aijah@postgres:5432/aijah
-      - OLLAMA_URL=http://ollama:11434
+    env_file:
+      - .env
     depends_on:
       postgres:
         condition: service_healthy
@@ -18,7 +16,7 @@ services:
   frontend:
     build: ./frontend
     ports:
-      - "3000:80"
+      - "3003:80"
 
   postgres:
     image: postgres:16
