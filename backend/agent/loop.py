@@ -47,8 +47,12 @@ _MCP_CLIENT: Client | None = None
 def _get_mcp_client() -> Client:
     global _MCP_CLIENT
     if _MCP_CLIENT is None:
-        # In Phase 1, MCP runs in-process (mounted at /mcp inside the same backend service).
-        _MCP_CLIENT = Client(mcp)
+        if settings.mcp_url:
+            # Extracted MCP server — connect over HTTP.
+            _MCP_CLIENT = Client(settings.mcp_url)
+        else:
+            # In-process MCP (local dev without Docker).
+            _MCP_CLIENT = Client(mcp)
     return _MCP_CLIENT
 
 

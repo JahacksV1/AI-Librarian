@@ -22,6 +22,8 @@ class Settings(BaseSettings):
 
     # --- MCP ---
     mcp_mount_path: str = "/mcp"
+    # When set, backend connects to MCP over HTTP (extracted container). When empty, uses in-process.
+    mcp_url: str = ""
 
     # --- HTTP (optional; enables CORS when non-empty) ---
     # Comma-separated origins, e.g. http://localhost:3000,http://127.0.0.1:3000

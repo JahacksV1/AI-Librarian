@@ -12,7 +12,6 @@ from api.routes import router as api_router
 from config import settings
 from db.connection import db_manager
 from db.enums import ModelProviderType
-from mcp_server import mcp_http_app
 
 logging.basicConfig(
     level=logging.INFO,
@@ -73,7 +72,6 @@ if _cors:
     )
 
 app.include_router(api_router)
-app.mount("/mcp", mcp_http_app)
 
 
 @app.get("/")

@@ -1,0 +1,206 @@
+# AIJAH — Build Roadmap
+
+> This is the working roadmap. Each item is a concrete action.
+> Check things off as they're done.
+
+---
+
+## Current Status
+
+| Phase | What | Status |
+|---|---|---|
+| Phase 1 | The Body — stack boots, all tools work, full pipeline runs | ✅ DONE |
+| Phase 1.5 | Provider switching — Anthropic/Claude working in production | ✅ DONE |
+| Next up | Docker Compose Watch + MCP Server Extraction | ✅ DONE |
+| Phase 2 (Brain) | Memory, embeddings, document reading | ⏳ Deferred — not the right move yet |
+| Phase 3 | Voice, browser control, reward learning | ⏳ Future |
+
+---
+
+## Next Up — Two Docker Improvements
+
+These are infrastructure improvements that make the codebase cleaner and development faster.
+Neither requires backend feature work. Both are Docker/config changes only.
+
+---
+
+### Item 1 — Docker Compose Watch
+
+**What it is:**
+
+Right now, every time you or your partner changes a Python file in the backend, you have to run
+`docker compose up --build` to see the change take effect inside Docker. That rebuilds the entire
+image — reinstalls all packages, copies all files — even if you just changed one line of code.
+That can take 30–60 seconds every single time.
+
+Docker Compose Watch fixes this. It watches your `./backend` folder on your Mac and the moment
+you save a file, it syncs that change directly into the running container. No rebuild. No restart
+of the whole image. The server picks it up in about 1–2 seconds.
+
+The only time it still does a full rebuild is if you change `requirements.txt` (adding a new
+Python package). That's correct — new packages have to be installed properly.
+
+**How it works technically:**
+
+Docker keeps a background process that monitors your files. When it sees a change, it copies just
+that file into the running container. It's like a live sync between your Mac and the container.
+
+**What we have to do:**
+
+Two things:
+
+1. Add a small config block to `docker-compose.yml` under the backend service
+2. Add `--reload` to the uvicorn command so the server inside the container restarts when it sees a file change
+
+Then instead of `docker compose up`, you run `docker compose watch`.
+
+**It is NOT something in the Docker Desktop app** — it's purely a config change in the compose file
+and a different command to run. Takes about 10 minutes to set up.
+
+- [x] Add `develop: watch:` block to `docker-compose.yml`
+- [x] Add `--reload` flag to backend uvicorn command
+- [x] Run `docker compose watch` — Watch enabled
+- [x] **Verify:** Change a Python file, save — backend synced without full rebuild ✓
+
+---
+
+### Item 2 — MCP Server Extraction
+
+**What it is:**
+
+Right now, the 6 tools AIJAH uses (scan_folder, propose_plan, execute_action, etc.) live
+**inside** the backend Python process. They share the same memory, the same container, the same
+everything as the API and the agent loop. They're all one blob.
+
+```
+RIGHT NOW:
+┌─────────────────────────────────────────────────────┐
+│  backend container                                   │
+│                                                      │
+│   FastAPI routes + Agent loop + MCP tools            │
+│                        │                             │
+│                   sandbox files                      │
+└─────────────────────────────────────────────────────┘
+```
+
+After extraction, the tools move into their own separate container:
+
+```
+AFTER EXTRACTION:
+┌──────────────────────────┐     ┌──────────────────────────┐
+│  backend container       │     │  mcp-server container     │
+│                          │     │                           │
+│  FastAPI + Agent loop    │────►│  MCP tools (6 tools)      │
+│                          │HTTP │                           │
+│  (no more direct tools)  │     │  sandbox files live here  │
+└──────────────────────────┘     └──────────────────────────┘
+```
+
+**Why this makes the codebase better:**
+
+1. **Cleaner separation** — the thing that talks to the AI (backend) and the thing that touches
+   your files (MCP tools) are completely isolated. If the backend crashes, the tools container
+   keeps running. If you update a tool, you restart only that container — not the whole backend.
+
+2. **The sandbox is properly isolated** — right now, your actual files (the sandbox bind mount)
+   are accessible from the same container that runs the AI agent loop. After extraction, only the
+   MCP tools container can touch your files. The backend never has direct access. This is cleaner
+   and more secure.
+
+3. **Foundation for adding more tools** — when Phase 2 comes (search_memory, read_document),
+   those new tools go into the MCP container, not the backend. The backend stays small and focused.
+   You add capability without adding bloat to the main API.
+
+4. **Independent scaling** — in Phase 3, you might have multiple things wanting to call MCP tools
+   (voice interface, browser control, etc.). With a separate container, they all just call
+   `http://mcp-server:8001` — one place, clean.
+
+**What we have to do:**
+
+Docker side (Caprice):
+- Add `mcp-server` as a new service in `docker-compose.yml` on port 8001
+- Move the `./sandbox:/sandbox` bind mount from `backend` to `mcp-server`
+- Add `MCP_URL=http://mcp-server:8001` to backend's environment variables
+
+Backend side (partner):
+- Change one line in `agent/loop.py`: swap `Client(mcp)` (in-process) for `Client("http://mcp-server:8001/mcp")` (HTTP call)
+- That's literally the only backend code change needed
+
+Verification:
+- Stack boots with 5 containers (was 4 — now adds mcp-server)
+- Run a message through AIJAH — scan, plan, execute should all still work
+- Sandbox files still get moved correctly
+
+- [x] New `mcp-server` service added to `docker-compose.yml`
+- [x] Sandbox bind mount moved from backend to mcp-server
+- [x] `MCP_URL` env var added to backend service
+- [x] Backend loop.py updated to call MCP over HTTP
+- [x] Stack boots with 5 containers, no errors
+- [x] End-to-end test: message → scan → plan → approve → execute still works
+
+---
+
+## Phase 2 — Install the Brain (deferred)
+
+Not the right move right now. Picking this back up when the time is right.
+
+When we do come back to it, the order is:
+1. Switch Postgres to `pgvector/pgvector:pg16` image
+2. Write embeddings + entity migrations
+3. Pull `nomic-embed-text` embedding model
+4. Build embedding pipeline + updated context assembler
+5. Build `search_memory` and `read_document` MCP tools
+
+---
+
+## Phase 3 — Grow the Brain (future)
+
+| Addition | What It Enables |
+|---|---|
+| Whisper server (port 8002) | Talk to AIJAH instead of typing |
+| TTS server (port 8003) | AIJAH reads responses back to you |
+| GPU passthrough | Faster local model inference |
+| Browser control tools | AIJAH can navigate tabs, open apps |
+| Reward system | Model learns from outcomes over time |
+
+---
+
+## Quick Reference — Docker Commands
+
+```bash
+# Normal start (cloud provider, no Ollama)
+docker compose up
+
+# Start with file-sync hot reload (after watch is configured)
+docker compose watch
+
+# Rebuild images after code changes
+docker compose up --build
+
+# Stop everything (data preserved)
+docker compose down
+
+# Stop everything and wipe database
+docker compose down -v
+
+# View live logs
+docker logs ai-librarian-backend-1 -f
+
+# Check what's running
+docker ps
+
+# Connect to Postgres directly
+docker compose exec postgres psql -U aijah -d aijah
+```
+
+---
+
+## Rules
+
+1. **Enums in three places must always match:** `TYPE_LEDGER.md` → `db/enums.py` → `001_create_enums.sql`
+2. **No auto-execute path** — a user must always click Execute. No shortcuts around the approval gate.
+3. **MCP extraction: Docker changes and backend change must happen together** — don't do one without the other or the stack breaks.
+
+---
+
+*Last updated: March 2026 — Phase 1 + 1.5 complete. Working on Docker Watch + MCP extraction.*

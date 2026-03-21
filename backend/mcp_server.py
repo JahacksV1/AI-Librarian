@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastmcp import FastMCP
+from starlette.responses import JSONResponse
 
 from tools.execute_action import execute_action
 from tools.get_task_state import get_task_state
@@ -104,4 +105,16 @@ async def update_task_state_tool(
     )
 
 
+@mcp.custom_route("/health", methods=["GET"])
+async def health_check(_request: Any) -> JSONResponse:
+    """Docker healthcheck endpoint."""
+    return JSONResponse({"status": "ok", "service": "mcp-server"})
+
+
+# For in-process use (backend when MCP_URL is unset) and ASGI deployment
 mcp_http_app = mcp.http_app(stateless_http=True)
+
+
+if __name__ == "__main__":
+    # Standalone HTTP server for Docker extraction. Serves at http://0.0.0.0:8001/mcp
+    mcp.run(transport="http", host="0.0.0.0", port=8001)

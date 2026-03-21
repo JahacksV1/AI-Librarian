@@ -9,8 +9,11 @@ Requirements:
   - Seed data exists (user 00000000-0000-0000-0000-000000000001)
   - qwen2.5 model pulled in ollama container
 
-Run:
-  python test_v1.py
+Run (from host, needs Python + httpx):
+  python3 test_v1.py
+
+Run via Docker (no local Python needed):
+  docker compose run --rm test
 
 Each step prints PASS or FAIL with detail. Stop on first failure by default.
 """
@@ -18,13 +21,14 @@ Each step prints PASS or FAIL with detail. Stop on first failure by default.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from typing import Any
 
 import httpx
 
-BASE_URL = "http://localhost:8000"
+BASE_URL = os.environ.get("BASE_URL", "http://localhost:8000")
 TEST_USER_ID = "00000000-0000-0000-0000-000000000001"
 SCAN_PATH = "/sandbox"
 
