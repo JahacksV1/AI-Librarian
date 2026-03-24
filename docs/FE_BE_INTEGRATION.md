@@ -48,6 +48,9 @@ API root is either:
 | PATCH | `/actions/{action_id}` | `{ status }` (`APPROVED` / `REJECTED`) | `{ id, status, updated_at }` |
 | POST | `/plans/{plan_id}/approve-all` | — | `{ approved_count, plan_id }` |
 | POST | `/plans/{plan_id}/execute` | — | **SSE stream** |
+| GET | `/scans?session_id=X` | — | List of scan records |
+| GET | `/scans/{scan_id}` | — | Single scan with summary |
+| GET | `/folders?device_id&path_prefix` | — | Folder entities |
 
 **Default dev user:** The UI may use `user_id = "00000000-0000-0000-0000-000000000001"` until real auth exists; that user must exist in DB (seed/migration).
 
@@ -83,6 +86,8 @@ The UI **must not** assume Ollama-only fields.
 | `plan_created` | `plan_id`, `goal`, `action_count` |
 | `action_executed` | `action_id`, `outcome`, `action_type` |
 | `execution_complete` | `plan_id`, `succeeded`, `failed` |
+| `scan_started` | `scan_id`, `root_path`, `scan_depth` |
+| `scan_complete` | `scan_id`, `file_count`, `folder_count`, `new_files`, `deleted_files`, `categories` |
 | `error` | `message`, `detail` |
 
 The UI router (`frontend/state/router.js`) should stay a **thin switch on `type`**; TS migration should preserve these strings as a union type.

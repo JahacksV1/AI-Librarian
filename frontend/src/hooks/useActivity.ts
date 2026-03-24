@@ -41,6 +41,12 @@ export function useActivity(options: UseActivityOptions = {}) {
         case 'execution_complete':
           push({ kind: 'action', text: `execution_complete: success=${event.succeeded}, failed=${event.failed}` })
           break
+        case 'scan_started':
+          push({ kind: 'info', text: `scan_started: ${event.root_path} (${event.scan_depth})` })
+          break
+        case 'scan_complete':
+          push({ kind: 'info', text: `scan_complete: ${event.file_count} files, ${event.folder_count} folders (${event.new_files} new, ${event.deleted_files} removed)` })
+          break
         case 'message_complete':
           push({ kind: 'info', text: 'message_complete' })
           break

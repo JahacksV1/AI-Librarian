@@ -117,6 +117,20 @@ class SourceType(str, Enum):
     APPROVED = "APPROVED"
 
 
+# --- Scan enums (Phase 1.7 — scan architecture) ---
+
+class ScanStatus(str, Enum):
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+
+
+class ScanDepth(str, Enum):
+    ROOT = "ROOT"
+    DEEP = "DEEP"
+    CONTENT = "CONTENT"
+
+
 # --- Model provider types (Phase 1.5 — config only, not stored in DB) ---
 
 class ModelProviderType(str, Enum):
@@ -161,4 +175,6 @@ class SSEEventType(str, Enum):
     PLAN_CREATED = "plan_created"
     ACTION_EXECUTED = "action_executed"
     EXECUTION_COMPLETE = "execution_complete"
+    SCAN_STARTED = "scan_started"
+    SCAN_COMPLETE = "scan_complete"
     ERROR = "error"

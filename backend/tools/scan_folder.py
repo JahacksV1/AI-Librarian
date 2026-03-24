@@ -1,20 +1,21 @@
 from __future__ import annotations
 
 import uuid
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy import select
 
 from db.connection import db_manager
-from db.models import Device, FileEntity, FolderEntity, Session
+from db.enums import ScanDepth, ScanStatus
+from db.models import Device, FileEntity, FolderEntity, Scan, Session
 from safety.sandbox import sandbox_service
 
 # ---------------------------------------------------------------------------
 # File intelligence helpers
 # ---------------------------------------------------------------------------
 
-# Keyword patterns for category guessing — checked against lowercase filename
 _CATEGORY_KEYWORDS: list[tuple[str, list[str]]] = [
     ("invoice",       ["invoice", "bill", "billing", "receipt", "payment", "statement"]),
     ("contract",      ["contract", "agreement", "nda", "sow", "terms", "engagement"]),
@@ -30,7 +31,6 @@ _CATEGORY_KEYWORDS: list[tuple[str, list[str]]] = [
     ("notes",         ["notes", "note", "todo", "ideas", "scratch"]),
 ]
 
-# Extensions that are safe to attempt a text preview on
 _TEXT_EXTENSIONS: frozenset[str] = frozenset({
     ".txt", ".md", ".markdown", ".csv", ".log", ".rst",
     ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg",
@@ -38,8 +38,8 @@ _TEXT_EXTENSIONS: frozenset[str] = frozenset({
     ".sh", ".bat", ".ps1",
 })
 
-_PREVIEW_MAX_BYTES = 512   # read limit to avoid large files
-_PREVIEW_CHARS = 200       # characters to include in output
+_PREVIEW_MAX_BYTES = 512
+_PREVIEW_CHARS = 200
 
 
 def _guess_category(filename: str, extension: str) -> str:
@@ -50,8 +50,7 @@ def _guess_category(filename: str, extension: str) -> str:
                 return category
 
     ext_map = {
-        ".pdf": "document",
-        ".doc": "document", ".docx": "document",
+        ".pdf": "document", ".doc": "document", ".docx": "document",
         ".xls": "spreadsheet", ".xlsx": "spreadsheet",
         ".ppt": "presentation", ".pptx": "presentation",
         ".jpg": "photo", ".jpeg": "photo", ".png": "photo",
@@ -73,7 +72,6 @@ def _read_content_preview(file_path: Path, extension: str) -> str | None:
         with open(file_path, "r", encoding="utf-8", errors="replace") as fh:
             raw = fh.read(_PREVIEW_MAX_BYTES)
         preview = raw[:_PREVIEW_CHARS].strip()
-        # Collapse whitespace runs to keep token count low
         preview = " ".join(preview.split())
         return preview if preview else None
     except OSError:
@@ -93,17 +91,16 @@ def _folder_payload(folder: FolderEntity) -> dict:
     }
 
 
-def _file_payload(file_entity: FileEntity, file_path: Path) -> dict:
-    extension = file_entity.extension or ""
+def _file_payload(file_entity: FileEntity) -> dict:
     return {
         "id": str(file_entity.id),
         "canonical_path": file_entity.canonical_path,
         "filename": file_entity.filename,
-        "extension": extension,
+        "extension": file_entity.extension or "",
         "size_bytes": file_entity.size_bytes,
         "modified_at": _to_iso(file_entity.modified_at),
-        "guessed_category": _guess_category(file_entity.filename, extension),
-        "content_preview": _read_content_preview(file_path, extension),
+        "guessed_category": file_entity.guessed_category,
+        "content_preview": file_entity.content_preview,
     }
 
 
@@ -112,100 +109,198 @@ async def scan_folder(path: str, recursive: bool = True, session_id: str = "") -
     directory = sandbox_service.resolve_directory(path)
     file_paths, folder_paths = sandbox_service.scan_paths(directory, recursive=recursive)
     seen_at = datetime.now(timezone.utc)
+    scan_root = str(directory)
 
-    async with db_manager.session() as session:
-        session_row = await session.get(Session, session_uuid)
+    async with db_manager.session() as db:
+        session_row = await db.get(Session, session_uuid)
         if session_row is None:
             raise ValueError(f"Session not found: {session_id}")
         if session_row.device_id is None:
             raise ValueError("Session has no device_id; scan_folder requires a device-bound session.")
 
-        device = await session.get(Device, session_row.device_id)
+        device = await db.get(Device, session_row.device_id)
         if device is None:
             raise ValueError("Session device_id is set, but device row does not exist.")
 
-        folder_entities: list[FolderEntity] = []
-        for folder_path in folder_paths:
-            existing_folder = await session.scalar(
-                select(FolderEntity).where(
-                    FolderEntity.device_id == device.id,
-                    FolderEntity.canonical_path == str(folder_path),
+        # --- Create scan record ---
+        scan_record = Scan(
+            session_id=session_uuid,
+            device_id=device.id,
+            root_path=scan_root,
+            scan_depth=ScanDepth.DEEP,
+            recursive=recursive,
+            status=ScanStatus.RUNNING,
+            started_at=seen_at,
+        )
+        db.add(scan_record)
+        await db.flush()
+        scan_id = scan_record.id
+
+        try:
+            # --- Track paths we see for change detection ---
+            seen_folder_paths: set[str] = set()
+            seen_file_paths: set[str] = set()
+            new_file_count = 0
+            category_counter: Counter[str] = Counter()
+
+            # --- Upsert folders ---
+            folder_entities: list[FolderEntity] = []
+            for folder_path in folder_paths:
+                canonical = str(folder_path)
+                seen_folder_paths.add(canonical)
+
+                existing = await db.scalar(
+                    select(FolderEntity).where(
+                        FolderEntity.device_id == device.id,
+                        FolderEntity.canonical_path == canonical,
+                    )
+                )
+                if existing is None:
+                    existing = FolderEntity(
+                        device_id=device.id,
+                        canonical_path=canonical,
+                        folder_name=folder_path.name or folder_path.anchor,
+                        parent_path=str(folder_path.parent) if folder_path != sandbox_service.root else None,
+                        first_seen_at=seen_at,
+                        last_seen_at=seen_at,
+                        exists_now=True,
+                        metadata_json={"scanned_via": "scan_folder"},
+                    )
+                    db.add(existing)
+                else:
+                    existing.folder_name = folder_path.name or folder_path.anchor
+                    existing.parent_path = (
+                        str(folder_path.parent) if folder_path != sandbox_service.root else None
+                    )
+                    existing.last_seen_at = seen_at
+                    existing.exists_now = True
+                    existing.metadata_json = {"scanned_via": "scan_folder"}
+
+                folder_entities.append(existing)
+
+            # --- Upsert files with enrichments ---
+            file_entities: list[FileEntity] = []
+            for file_path in file_paths:
+                canonical = str(file_path)
+                seen_file_paths.add(canonical)
+                metadata = sandbox_service.metadata_for_path(file_path)
+                extension = metadata.extension or ""
+                category = _guess_category(file_path.name, extension)
+                preview = _read_content_preview(file_path, extension)
+                category_counter[category] += 1
+
+                existing = await db.scalar(
+                    select(FileEntity).where(
+                        FileEntity.device_id == device.id,
+                        FileEntity.canonical_path == canonical,
+                    )
+                )
+                is_new = existing is None
+                if is_new:
+                    new_file_count += 1
+                    existing = FileEntity(
+                        device_id=device.id,
+                        canonical_path=canonical,
+                        filename=file_path.name,
+                        extension=extension,
+                        mime_type=metadata.mime_type,
+                        size_bytes=metadata.size_bytes,
+                        content_hash=None,
+                        modified_at=metadata.modified_at,
+                        created_at_fs=metadata.created_at_fs,
+                        first_seen_at=seen_at,
+                        last_seen_at=seen_at,
+                        exists_now=True,
+                        metadata_json={"scanned_via": "scan_folder"},
+                        guessed_category=category,
+                        content_preview=preview,
+                        last_scan_id=scan_id,
+                    )
+                    db.add(existing)
+                else:
+                    existing.filename = file_path.name
+                    existing.extension = extension
+                    existing.mime_type = metadata.mime_type
+                    existing.size_bytes = metadata.size_bytes
+                    existing.modified_at = metadata.modified_at
+                    existing.created_at_fs = metadata.created_at_fs
+                    existing.last_seen_at = seen_at
+                    existing.exists_now = True
+                    existing.metadata_json = {"scanned_via": "scan_folder"}
+                    existing.guessed_category = category
+                    existing.content_preview = preview
+                    existing.last_scan_id = scan_id
+
+                file_entities.append(existing)
+
+            await db.flush()
+
+            # --- Change detection: mark missing files/folders ---
+            prefix_filter = f"{scan_root}%" if not scan_root.endswith("/") else f"{scan_root}%"
+
+            previously_known_files = list(
+                await db.scalars(
+                    select(FileEntity).where(
+                        FileEntity.device_id == device.id,
+                        FileEntity.canonical_path.like(prefix_filter),
+                        FileEntity.exists_now.is_(True),
+                    )
                 )
             )
-            if existing_folder is None:
-                existing_folder = FolderEntity(
-                    device_id=device.id,
-                    canonical_path=str(folder_path),
-                    folder_name=folder_path.name or folder_path.anchor,
-                    parent_path=str(folder_path.parent) if folder_path != sandbox_service.root else None,
-                    first_seen_at=seen_at,
-                    last_seen_at=seen_at,
-                    exists_now=True,
-                    metadata_json={"scanned_via": "scan_folder"},
-                )
-                session.add(existing_folder)
-            else:
-                existing_folder.folder_name = folder_path.name or folder_path.anchor
-                existing_folder.parent_path = (
-                    str(folder_path.parent) if folder_path != sandbox_service.root else None
-                )
-                existing_folder.last_seen_at = seen_at
-                existing_folder.exists_now = True
-                existing_folder.metadata_json = {"scanned_via": "scan_folder"}
+            deleted_file_count = 0
+            for fe in previously_known_files:
+                if fe.canonical_path not in seen_file_paths:
+                    fe.exists_now = False
+                    deleted_file_count += 1
 
-            folder_entities.append(existing_folder)
-
-        file_entities_with_paths: list[tuple[FileEntity, Path]] = []
-        for file_path in file_paths:
-            metadata = sandbox_service.metadata_for_path(file_path)
-            existing_file = await session.scalar(
-                select(FileEntity).where(
-                    FileEntity.device_id == device.id,
-                    FileEntity.canonical_path == str(file_path),
+            previously_known_folders = list(
+                await db.scalars(
+                    select(FolderEntity).where(
+                        FolderEntity.device_id == device.id,
+                        FolderEntity.canonical_path.like(prefix_filter),
+                        FolderEntity.exists_now.is_(True),
+                    )
                 )
             )
-            if existing_file is None:
-                existing_file = FileEntity(
-                    device_id=device.id,
-                    canonical_path=str(file_path),
-                    filename=file_path.name,
-                    extension=metadata.extension,
-                    mime_type=metadata.mime_type,
-                    size_bytes=metadata.size_bytes,
-                    content_hash=None,
-                    modified_at=metadata.modified_at,
-                    created_at_fs=metadata.created_at_fs,
-                    first_seen_at=seen_at,
-                    last_seen_at=seen_at,
-                    exists_now=True,
-                    metadata_json={"scanned_via": "scan_folder"},
-                )
-                session.add(existing_file)
-            else:
-                existing_file.filename = file_path.name
-                existing_file.extension = metadata.extension
-                existing_file.mime_type = metadata.mime_type
-                existing_file.size_bytes = metadata.size_bytes
-                existing_file.modified_at = metadata.modified_at
-                existing_file.created_at_fs = metadata.created_at_fs
-                existing_file.last_seen_at = seen_at
-                existing_file.exists_now = True
-                existing_file.metadata_json = {"scanned_via": "scan_folder"}
+            for fo in previously_known_folders:
+                if fo.canonical_path not in seen_folder_paths:
+                    fo.exists_now = False
 
-            file_entities_with_paths.append((existing_file, file_path))
+            # --- Finalize scan record ---
+            scan_record.file_count = len(file_entities)
+            scan_record.folder_count = len(folder_entities)
+            scan_record.new_files = new_file_count
+            scan_record.deleted_files = deleted_file_count
+            scan_record.modified_files = 0
+            scan_record.status = ScanStatus.COMPLETED
+            scan_record.completed_at = datetime.now(timezone.utc)
+            scan_record.summary_json = {
+                "categories": dict(category_counter.most_common()),
+                "top_folders": [
+                    fe.canonical_path for fe in sorted(
+                        folder_entities,
+                        key=lambda f: sum(1 for fi in file_entities if str(Path(fi.canonical_path).parent) == f.canonical_path),
+                        reverse=True,
+                    )[:5]
+                ],
+            }
 
-        await session.flush()
-        await session.commit()
+            await db.commit()
 
-        # Build folder summaries: per-folder category breakdown
-        folder_canonical_paths = {str(fp) for fp in folder_paths}
-        folder_file_counts: dict[str, int] = {p: 0 for p in folder_canonical_paths}
-        folder_categories: dict[str, list[str]] = {p: [] for p in folder_canonical_paths}
-        for file_entity, file_path in file_entities_with_paths:
-            parent = str(file_path.parent)
+        except Exception:
+            scan_record.status = ScanStatus.FAILED
+            scan_record.completed_at = datetime.now(timezone.utc)
+            await db.commit()
+            raise
+
+        # --- Build folder summaries ---
+        folder_file_counts: dict[str, int] = {fe.canonical_path: 0 for fe in folder_entities}
+        folder_categories: dict[str, list[str]] = {fe.canonical_path: [] for fe in folder_entities}
+        for file_entity in file_entities:
+            parent = str(Path(file_entity.canonical_path).parent)
             if parent in folder_file_counts:
                 folder_file_counts[parent] += 1
-                cat = _guess_category(file_entity.filename, file_entity.extension or "")
+                cat = file_entity.guessed_category or "unknown"
                 if cat not in folder_categories[parent]:
                     folder_categories[parent].append(cat)
 
@@ -217,7 +312,13 @@ async def scan_folder(path: str, recursive: bool = True, session_id: str = "") -
             folder_payloads.append(payload)
 
         return {
-            "files": [_file_payload(fe, fp) for fe, fp in file_entities_with_paths],
+            "scan_id": str(scan_id),
+            "files": [_file_payload(fe) for fe in file_entities],
             "folders": folder_payloads,
-            "summary": f"Scanned {len(file_entities_with_paths)} files across {len(folder_entities)} folders.",
+            "summary": f"Scanned {len(file_entities)} files across {len(folder_entities)} folders.",
+            "changes": {
+                "new_files": new_file_count,
+                "deleted_files": deleted_file_count,
+            },
+            "categories": dict(category_counter.most_common()),
         }

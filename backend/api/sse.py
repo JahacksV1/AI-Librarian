@@ -65,6 +65,38 @@ def execution_complete_event(plan_id: str, succeeded: int, failed: int) -> str:
     )
 
 
+def scan_started_event(scan_id: str, root_path: str, scan_depth: str) -> str:
+    return _event(
+        {
+            "type": SSEEventType.SCAN_STARTED.value,
+            "scan_id": scan_id,
+            "root_path": root_path,
+            "scan_depth": scan_depth,
+        }
+    )
+
+
+def scan_complete_event(
+    scan_id: str,
+    file_count: int,
+    folder_count: int,
+    new_files: int,
+    deleted_files: int,
+    categories: dict[str, int],
+) -> str:
+    return _event(
+        {
+            "type": SSEEventType.SCAN_COMPLETE.value,
+            "scan_id": scan_id,
+            "file_count": file_count,
+            "folder_count": folder_count,
+            "new_files": new_files,
+            "deleted_files": deleted_files,
+            "categories": categories,
+        }
+    )
+
+
 def error_event(message: str, detail: str) -> str:
     return _event(
         {
@@ -112,6 +144,21 @@ def from_payload(payload: dict[str, Any]) -> str:
             plan_id=str(payload.get("plan_id", "")),
             succeeded=int(payload.get("succeeded", 0)),
             failed=int(payload.get("failed", 0)),
+        )
+    if event_type == SSEEventType.SCAN_STARTED.value:
+        return scan_started_event(
+            scan_id=str(payload.get("scan_id", "")),
+            root_path=str(payload.get("root_path", "")),
+            scan_depth=str(payload.get("scan_depth", "")),
+        )
+    if event_type == SSEEventType.SCAN_COMPLETE.value:
+        return scan_complete_event(
+            scan_id=str(payload.get("scan_id", "")),
+            file_count=int(payload.get("file_count", 0)),
+            folder_count=int(payload.get("folder_count", 0)),
+            new_files=int(payload.get("new_files", 0)),
+            deleted_files=int(payload.get("deleted_files", 0)),
+            categories=payload.get("categories", {}) or {},
         )
     if event_type == SSEEventType.ERROR.value:
         return error_event(

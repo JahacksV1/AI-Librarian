@@ -1,4 +1,4 @@
-import type { HealthResponse, PlanResponse, SessionResponse } from '../types/api'
+import type { FileResponse, FolderResponse, HealthResponse, PlanResponse, ScanResponse, SessionResponse } from '../types/api'
 
 const BASE = import.meta.env.VITE_API_BASE ?? '/api'
 
@@ -67,4 +67,26 @@ export function approveAll(planId: string): Promise<void> {
 
 export function executePlan(planId: string): Promise<Response> {
   return request(`/plans/${planId}/execute`, { method: 'POST' })
+}
+
+export function getScans(sessionId: string): Promise<{ scans: ScanResponse[] }> {
+  return requestJson<{ scans: ScanResponse[] }>(`/scans?session_id=${sessionId}`)
+}
+
+export function getScan(scanId: string): Promise<ScanResponse> {
+  return requestJson<ScanResponse>(`/scans/${scanId}`)
+}
+
+export function getFolders(deviceId?: string, pathPrefix?: string): Promise<{ folders: FolderResponse[] }> {
+  const params = new URLSearchParams()
+  if (deviceId) params.set('device_id', deviceId)
+  if (pathPrefix) params.set('path_prefix', pathPrefix)
+  return requestJson<{ folders: FolderResponse[] }>(`/folders?${params}`)
+}
+
+export function getFiles(deviceId?: string, pathPrefix?: string): Promise<{ files: FileResponse[] }> {
+  const params = new URLSearchParams()
+  if (deviceId) params.set('device_id', deviceId)
+  if (pathPrefix) params.set('path_prefix', pathPrefix)
+  return requestJson<{ files: FileResponse[] }>(`/files?${params}`)
 }

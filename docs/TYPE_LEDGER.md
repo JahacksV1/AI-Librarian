@@ -268,6 +268,28 @@ Read from: `MODEL_PROVIDER` in `.env` / `config.py`
 
 ---
 
+### ScanStatus
+Status of a scan record in `scans.status` **(Phase 1.7)**.
+
+| Value | Meaning |
+|---|---|
+| `RUNNING` | Scan is currently in progress |
+| `COMPLETED` | Scan finished successfully |
+| `FAILED` | Scan encountered an error |
+
+---
+
+### ScanDepth
+Depth of scan in `scans.scan_depth` **(Phase 1.7)**.
+
+| Value | Meaning |
+|---|---|
+| `ROOT` | Top-level folder listing only (fast, no deep traversal) |
+| `DEEP` | Full recursive scan with file metadata |
+| `CONTENT` | Deep scan plus text previews for supported files |
+
+---
+
 ### EnvironmentType
 Type of environment in `environment_actions.environment_type` **(Phase 3 — table and tools do not exist until Phase 3)**.
 
@@ -341,13 +363,14 @@ One line per table. Phase 1 only.
 | `sessions` | id, user_id, device_id, mode, status | Conversation sessions |
 | `session_messages` | id, session_id, role, content, tool_name | All messages in a session |
 | `task_state` | id, session_id, goal, current_step, active_plan_id | Working memory per session |
-| `file_entities` | id, device_id, canonical_path, filename, exists_now | Known files on device |
+| `file_entities` | id, device_id, canonical_path, filename, guessed_category, exists_now | Known files on device |
 | `folder_entities` | id, device_id, canonical_path, folder_name, parent_path | Known folders on device |
 | `plans` | id, session_id, goal, status, plan_json | Generated plans |
 | `plan_actions` | id, plan_id, action_type, status, action_payload_json | Individual actions within a plan |
 | `memory_events` | id, session_id, event_type, pre_state_json, post_state_json, outcome | Audit log of every event |
 | `user_preferences` | id, user_id, preference_key, preference_value_json, confidence | Learned or stated user preferences |
 | `operational_policies` | id, user_id, policy_name, policy_type, policy_text, is_active | Safety and behavior rules |
+| `scans` | id, session_id, device_id, root_path, scan_depth, status, file_count, folder_count | Scan history records |
 
 ---
 
@@ -597,6 +620,11 @@ These are the exact tool signatures the agent discovers via `tools/list`. All to
 
 All SSE events arrive as `data: <json>\n\n`. Parse `type` first to determine the shape.
 
+| Event | Meaning | Fields |
+|---|---|---|
+| `scan_started` | Scan begins | `scan_id`, `root_path`, `scan_depth` |
+| `scan_complete` | Scan finishes | `scan_id`, `file_count`, `folder_count`, `new_files`, `deleted_files`, `categories` |
+
 ```typescript
 type SSEEvent =
   | { type: "token";             token: string }
@@ -606,6 +634,8 @@ type SSEEvent =
   | { type: "plan_created";      plan_id: string; goal: string; action_count: number }
   | { type: "action_executed";   action_id: string; outcome: "SUCCESS" | "FAILED"; action_type: ActionType }
   | { type: "execution_complete"; plan_id: string; succeeded: number; failed: number }
+  | { type: "scan_started";       scan_id: string; root_path: string; scan_depth: string }
+  | { type: "scan_complete";     scan_id: string; file_count: number; folder_count: number; new_files: number; deleted_files: number; categories: Record<string, number> }
   | { type: "error";             message: string; detail: string }
 ```
 
@@ -658,6 +688,8 @@ EntityType:     CLIENT | MATTER | DOCUMENT_TYPE | WORKFLOW | FOLDER_PATTERN | TA
 LinkType:       CLASSIFIED_AS | BELONGS_TO_CLIENT | BELONGS_TO_MATTER | RESEMBLES  [Phase 2]
 SourceType:     MODEL | USER | RULE | TOOL | EXPLICIT_USER | INFERRED | APPROVED
 DeviceType:     WINDOWS_PC | MAC | LAPTOP | MAC_LAPTOP | VM | SERVER
+ScanStatus:    RUNNING | COMPLETED | FAILED
+ScanDepth:     ROOT | DEEP | CONTENT
 EnvironmentType: BROWSER | FILESYSTEM | APP  [Phase 3]
 ```
 

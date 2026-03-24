@@ -31,6 +31,8 @@ from db.enums import (
     PlanStatus,
     PolicyType,
     RoleType,
+    ScanDepth,
+    ScanStatus,
     SessionMode,
     SessionStatus,
     SourceType,
@@ -48,6 +50,8 @@ role_type_enum = PGEnum(RoleType, name="role_type_enum", create_type=False)
 policy_type_enum = PGEnum(PolicyType, name="policy_type_enum", create_type=False)
 device_type_enum = PGEnum(DeviceType, name="device_type_enum", create_type=False)
 source_type_enum = PGEnum(SourceType, name="source_type_enum", create_type=False)
+scan_status_enum = PGEnum(ScanStatus, name="scan_status_enum", create_type=False)
+scan_depth_enum = PGEnum(ScanDepth, name="scan_depth_enum", create_type=False)
 
 
 class Base(DeclarativeBase):
@@ -244,6 +248,59 @@ class TaskState(UUIDPrimaryKeyMixin, Base):
     active_plan: Mapped[Plan | None] = relationship(back_populates="task_states")
 
 
+class Scan(UUIDPrimaryKeyMixin, Base):
+    __tablename__ = "scans"
+    __table_args__ = (
+        Index("idx_scans_session_id", "session_id"),
+        Index("idx_scans_device_id", "device_id"),
+    )
+
+    session_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("sessions.id"),
+    )
+    device_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("devices.id"),
+        nullable=False,
+    )
+    root_path: Mapped[str] = mapped_column(Text, nullable=False)
+    scan_depth: Mapped[ScanDepth] = mapped_column(
+        scan_depth_enum,
+        nullable=False,
+        server_default=text("'DEEP'"),
+    )
+    recursive: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("true"),
+    )
+    file_count: Mapped[int | None] = mapped_column()
+    folder_count: Mapped[int | None] = mapped_column()
+    new_files: Mapped[int] = mapped_column(server_default=text("0"))
+    deleted_files: Mapped[int] = mapped_column(server_default=text("0"))
+    modified_files: Mapped[int] = mapped_column(server_default=text("0"))
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[ScanStatus] = mapped_column(
+        scan_status_enum,
+        nullable=False,
+        server_default=text("'RUNNING'"),
+    )
+    summary_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+    session: Mapped[Session | None] = relationship()
+    device: Mapped[Device] = relationship()
+
+
 class FileEntity(UUIDPrimaryKeyMixin, Base):
     __tablename__ = "file_entities"
     __table_args__ = (
@@ -274,6 +331,12 @@ class FileEntity(UUIDPrimaryKeyMixin, Base):
     )
     exists_now: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
     metadata_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    guessed_category: Mapped[str | None] = mapped_column(Text)
+    content_preview: Mapped[str | None] = mapped_column(Text)
+    last_scan_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("scans.id"),
+    )
 
     device: Mapped[Device] = relationship(back_populates="file_entities")
 
