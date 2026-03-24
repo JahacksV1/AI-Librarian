@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
@@ -158,12 +159,18 @@ def _format_active_plan(plan: Plan, actions: list[PlanAction]) -> str | None:
     return "\n".join(lines)
 
 
-def _format_last_scan(scan: Scan | None) -> str | None:
+def _format_last_scan(scan: Scan | None, current_session_id: str | None = None) -> str | None:
     if scan is None:
         return None
 
+    is_from_prior_session = (
+        current_session_id is not None
+        and str(scan.session_id) != current_session_id
+    )
+    label = "Last scan (prior session — device memory):" if is_from_prior_session else "Last scan:"
+
     lines = [
-        "Last scan:",
+        label,
         f"  Scanned {scan.root_path} at {scan.started_at.isoformat() if scan.started_at else '?'}"
         f" (depth: {scan.scan_depth.value}, {'recursive' if scan.recursive else 'non-recursive'})",
         f"  Found: {scan.file_count or 0} files across {scan.folder_count or 0} folders",
@@ -175,6 +182,11 @@ def _format_last_scan(scan: Scan | None) -> str | None:
         if categories and isinstance(categories, dict):
             parts = [f"{cat} ({count})" for cat, count in categories.items()]
             lines.append(f"  Categories: {', '.join(parts)}")
+
+        top_folders = scan.summary_json.get("top_folders")
+        if top_folders and isinstance(top_folders, list):
+            folder_names = [Path(p).name for p in top_folders[:5]]
+            lines.append(f"  Top folders: {', '.join(folder_names)}")
 
     return "\n".join(lines)
 
@@ -330,12 +342,24 @@ async def assemble_context(session_id: str) -> ContextPacket:
                     )
                 )
 
+        # Try session-scoped first (most relevant — what happened in this conversation).
+        # Fall back to device-scoped so a new session inherits knowledge from past scans.
         last_scan: Scan | None = await session.scalar(
             select(Scan)
             .where(Scan.session_id == session_uuid)
             .order_by(Scan.started_at.desc())
             .limit(1)
         )
+        if last_scan is None and session_row.device_id is not None:
+            last_scan = await session.scalar(
+                select(Scan)
+                .where(
+                    Scan.device_id == session_row.device_id,
+                    Scan.status == "COMPLETED",
+                )
+                .order_by(Scan.started_at.desc())
+                .limit(1)
+            )
 
     return ContextPacket(
         session_id=str(session_row.id),
@@ -347,6 +371,6 @@ async def assemble_context(session_id: str) -> ContextPacket:
         task_state_text=_format_task_state(task_state),
         recent_memories_text=_format_recent_memory_events(recent_events),
         active_plan_text=_format_active_plan(active_plan, active_plan_actions) if active_plan else None,
-        last_scan_text=_format_last_scan(last_scan),
+        last_scan_text=_format_last_scan(last_scan, current_session_id=str(session_row.id)),
         conversation_messages=[_session_message_to_dict(message) for message in conversation_rows],
     )

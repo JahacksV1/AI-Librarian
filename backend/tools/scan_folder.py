@@ -104,12 +104,51 @@ def _file_payload(file_entity: FileEntity) -> dict:
     }
 
 
-async def scan_folder(path: str, recursive: bool = True, session_id: str = "") -> dict:
+def _count_immediate_children(folder_path: Path) -> int:
+    """Count direct children of a folder without recursing — fast for ROOT scan."""
+    try:
+        return sum(1 for _ in folder_path.iterdir())
+    except (PermissionError, OSError):
+        return 0
+
+
+# ---------------------------------------------------------------------------
+# Three scan depth modes
+#
+# ROOT    — immediate children only. Returns folder tree at one level.
+#           No content reading. Fast — used for orientation and discovery.
+#           "What is at the top of this path?"
+#
+# DEEP    — full recursive walk, metadata only (name, size, date, category
+#           guessed from filename). No content reading. The full inventory.
+#           "Give me everything that exists here, structured."
+#
+# CONTENT — full recursive walk + text previews for supported file types.
+#           Slower. Used when the model needs to understand what's inside files.
+#           Always targeted to a specific path, not the whole filesystem.
+# ---------------------------------------------------------------------------
+
+
+async def scan_folder(
+    path: str,
+    recursive: bool = True,
+    session_id: str = "",
+    scan_depth: str = "DEEP",
+) -> dict:
     session_uuid = uuid.UUID(session_id)
     directory = sandbox_service.resolve_directory(path)
-    file_paths, folder_paths = sandbox_service.scan_paths(directory, recursive=recursive)
     seen_at = datetime.now(timezone.utc)
     scan_root = str(directory)
+
+    try:
+        depth = ScanDepth(scan_depth.upper())
+    except ValueError:
+        depth = ScanDepth.DEEP
+
+    # ROOT always walks only the immediate level regardless of the recursive flag.
+    use_recursive = False if depth == ScanDepth.ROOT else recursive
+
+    file_paths, folder_paths = sandbox_service.scan_paths(directory, recursive=use_recursive)
 
     async with db_manager.session() as db:
         session_row = await db.get(Session, session_uuid)
@@ -122,13 +161,12 @@ async def scan_folder(path: str, recursive: bool = True, session_id: str = "") -
         if device is None:
             raise ValueError("Session device_id is set, but device row does not exist.")
 
-        # --- Create scan record ---
         scan_record = Scan(
             session_id=session_uuid,
             device_id=device.id,
             root_path=scan_root,
-            scan_depth=ScanDepth.DEEP,
-            recursive=recursive,
+            scan_depth=depth,
+            recursive=use_recursive,
             status=ScanStatus.RUNNING,
             started_at=seen_at,
         )
@@ -137,7 +175,6 @@ async def scan_folder(path: str, recursive: bool = True, session_id: str = "") -
         scan_id = scan_record.id
 
         try:
-            # --- Track paths we see for change detection ---
             seen_folder_paths: set[str] = set()
             seen_file_paths: set[str] = set()
             new_file_count = 0
@@ -164,7 +201,7 @@ async def scan_folder(path: str, recursive: bool = True, session_id: str = "") -
                         first_seen_at=seen_at,
                         last_seen_at=seen_at,
                         exists_now=True,
-                        metadata_json={"scanned_via": "scan_folder"},
+                        metadata_json={"scanned_via": "scan_folder", "scan_depth": depth.value},
                     )
                     db.add(existing)
                 else:
@@ -174,11 +211,16 @@ async def scan_folder(path: str, recursive: bool = True, session_id: str = "") -
                     )
                     existing.last_seen_at = seen_at
                     existing.exists_now = True
-                    existing.metadata_json = {"scanned_via": "scan_folder"}
+                    existing.metadata_json = {"scanned_via": "scan_folder", "scan_depth": depth.value}
 
                 folder_entities.append(existing)
 
-            # --- Upsert files with enrichments ---
+            # --- Upsert files ---
+            # DEEP: metadata only, no content reading
+            # CONTENT: metadata + content preview
+            # ROOT: files at the immediate level only (already limited by use_recursive=False)
+            read_content = (depth == ScanDepth.CONTENT)
+
             file_entities: list[FileEntity] = []
             for file_path in file_paths:
                 canonical = str(file_path)
@@ -186,7 +228,7 @@ async def scan_folder(path: str, recursive: bool = True, session_id: str = "") -
                 metadata = sandbox_service.metadata_for_path(file_path)
                 extension = metadata.extension or ""
                 category = _guess_category(file_path.name, extension)
-                preview = _read_content_preview(file_path, extension)
+                preview = _read_content_preview(file_path, extension) if read_content else None
                 category_counter[category] += 1
 
                 existing = await db.scalar(
@@ -211,7 +253,7 @@ async def scan_folder(path: str, recursive: bool = True, session_id: str = "") -
                         first_seen_at=seen_at,
                         last_seen_at=seen_at,
                         exists_now=True,
-                        metadata_json={"scanned_via": "scan_folder"},
+                        metadata_json={"scanned_via": "scan_folder", "scan_depth": depth.value},
                         guessed_category=category,
                         content_preview=preview,
                         last_scan_id=scan_id,
@@ -226,9 +268,12 @@ async def scan_folder(path: str, recursive: bool = True, session_id: str = "") -
                     existing.created_at_fs = metadata.created_at_fs
                     existing.last_seen_at = seen_at
                     existing.exists_now = True
-                    existing.metadata_json = {"scanned_via": "scan_folder"}
+                    existing.metadata_json = {"scanned_via": "scan_folder", "scan_depth": depth.value}
                     existing.guessed_category = category
-                    existing.content_preview = preview
+                    # Only overwrite content_preview if we're doing a CONTENT scan.
+                    # DEEP scan does not clear an existing preview set by a past CONTENT scan.
+                    if read_content:
+                        existing.content_preview = preview
                     existing.last_scan_id = scan_id
 
                 file_entities.append(existing)
@@ -238,35 +283,49 @@ async def scan_folder(path: str, recursive: bool = True, session_id: str = "") -
             # --- Change detection: mark missing files/folders ---
             prefix_filter = f"{scan_root}%" if not scan_root.endswith("/") else f"{scan_root}%"
 
-            previously_known_files = list(
-                await db.scalars(
-                    select(FileEntity).where(
-                        FileEntity.device_id == device.id,
-                        FileEntity.canonical_path.like(prefix_filter),
-                        FileEntity.exists_now.is_(True),
-                    )
-                )
-            )
+            # Change detection only makes sense for DEEP/CONTENT where we see everything.
+            # ROOT scan covers only one level so we cannot infer deletions below that level.
             deleted_file_count = 0
-            for fe in previously_known_files:
-                if fe.canonical_path not in seen_file_paths:
-                    fe.exists_now = False
-                    deleted_file_count += 1
-
-            previously_known_folders = list(
-                await db.scalars(
-                    select(FolderEntity).where(
-                        FolderEntity.device_id == device.id,
-                        FolderEntity.canonical_path.like(prefix_filter),
-                        FolderEntity.exists_now.is_(True),
+            if depth != ScanDepth.ROOT:
+                previously_known_files = list(
+                    await db.scalars(
+                        select(FileEntity).where(
+                            FileEntity.device_id == device.id,
+                            FileEntity.canonical_path.like(prefix_filter),
+                            FileEntity.exists_now.is_(True),
+                        )
                     )
                 )
-            )
-            for fo in previously_known_folders:
-                if fo.canonical_path not in seen_folder_paths:
-                    fo.exists_now = False
+                for fe in previously_known_files:
+                    if fe.canonical_path not in seen_file_paths:
+                        fe.exists_now = False
+                        deleted_file_count += 1
 
-            # --- Finalize scan record ---
+                previously_known_folders = list(
+                    await db.scalars(
+                        select(FolderEntity).where(
+                            FolderEntity.device_id == device.id,
+                            FolderEntity.canonical_path.like(prefix_filter),
+                            FolderEntity.exists_now.is_(True),
+                        )
+                    )
+                )
+                for fo in previously_known_folders:
+                    if fo.canonical_path not in seen_folder_paths:
+                        fo.exists_now = False
+
+            # --- Build folder summaries (for ROOT: immediate child counts; for DEEP/CONTENT: file counts) ---
+            if depth == ScanDepth.ROOT:
+                # For ROOT, count each subfolder's immediate children — fast one-level look.
+                folder_child_counts: dict[str, int] = {}
+                for fe in folder_entities:
+                    fp = Path(fe.canonical_path)
+                    if fp != directory:
+                        folder_child_counts[fe.canonical_path] = _count_immediate_children(fp)
+            else:
+                folder_child_counts = {}
+
+            # Finalize scan record
             scan_record.file_count = len(file_entities)
             scan_record.folder_count = len(folder_entities)
             scan_record.new_files = new_file_count
@@ -274,16 +333,32 @@ async def scan_folder(path: str, recursive: bool = True, session_id: str = "") -
             scan_record.modified_files = 0
             scan_record.status = ScanStatus.COMPLETED
             scan_record.completed_at = datetime.now(timezone.utc)
-            scan_record.summary_json = {
-                "categories": dict(category_counter.most_common()),
-                "top_folders": [
-                    fe.canonical_path for fe in sorted(
-                        folder_entities,
-                        key=lambda f: sum(1 for fi in file_entities if str(Path(fi.canonical_path).parent) == f.canonical_path),
-                        reverse=True,
-                    )[:5]
-                ],
-            }
+
+            if depth == ScanDepth.ROOT:
+                subfolders_sorted = sorted(
+                    [fe for fe in folder_entities if Path(fe.canonical_path) != directory],
+                    key=lambda f: folder_child_counts.get(f.canonical_path, 0),
+                    reverse=True,
+                )
+                scan_record.summary_json = {
+                    "categories": dict(category_counter.most_common()),
+                    "top_folders": [fe.canonical_path for fe in subfolders_sorted],
+                    "folder_child_counts": folder_child_counts,
+                }
+            else:
+                scan_record.summary_json = {
+                    "categories": dict(category_counter.most_common()),
+                    "top_folders": [
+                        fe.canonical_path for fe in sorted(
+                            folder_entities,
+                            key=lambda f: sum(
+                                1 for fi in file_entities
+                                if str(Path(fi.canonical_path).parent) == f.canonical_path
+                            ),
+                            reverse=True,
+                        )[:5]
+                    ],
+                }
 
             await db.commit()
 
@@ -293,7 +368,35 @@ async def scan_folder(path: str, recursive: bool = True, session_id: str = "") -
             await db.commit()
             raise
 
-        # --- Build folder summaries ---
+        # --- Build return payload ---
+        if depth == ScanDepth.ROOT:
+            # Return folder summaries with child counts — the discovery view.
+            subfolder_payloads = []
+            for folder in folder_entities:
+                if Path(folder.canonical_path) == directory:
+                    continue
+                payload = _folder_payload(folder)
+                payload["child_count"] = folder_child_counts.get(folder.canonical_path, 0)
+                subfolder_payloads.append(payload)
+            subfolder_payloads.sort(key=lambda f: f["child_count"], reverse=True)
+
+            return {
+                "scan_id": str(scan_id),
+                "scan_depth": depth.value,
+                "files": [_file_payload(fe) for fe in file_entities],
+                "folders": subfolder_payloads,
+                "summary": (
+                    f"Root scan of {scan_root}: found {len(subfolder_payloads)} subfolders"
+                    + (f" and {len(file_entities)} files at this level." if file_entities else ".")
+                ),
+                "changes": {
+                    "new_files": new_file_count,
+                    "deleted_files": 0,
+                },
+                "categories": dict(category_counter.most_common()),
+            }
+
+        # DEEP / CONTENT — full folder + file list with per-folder counts
         folder_file_counts: dict[str, int] = {fe.canonical_path: 0 for fe in folder_entities}
         folder_categories: dict[str, list[str]] = {fe.canonical_path: [] for fe in folder_entities}
         for file_entity in file_entities:
@@ -313,6 +416,7 @@ async def scan_folder(path: str, recursive: bool = True, session_id: str = "") -
 
         return {
             "scan_id": str(scan_id),
+            "scan_depth": depth.value,
             "files": [_file_payload(fe) for fe in file_entities],
             "folders": folder_payloads,
             "summary": f"Scanned {len(file_entities)} files across {len(folder_entities)} folders.",

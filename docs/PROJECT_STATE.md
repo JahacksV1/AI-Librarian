@@ -140,7 +140,7 @@ and they talk to each other over a private internal network.
 
 When you run `docker compose up`, Docker builds the images (if needed) and starts containers from them.
 
-### The Four Services (Phase 1)
+### The Current Services
 
 ```
 Browser (you)
@@ -149,16 +149,23 @@ Browser (you)
 frontend container  (nginx serving built React/Vite files)
     │ /api/* → backend:8000
     ▼ port 8000
-backend container   (Python + FastAPI + agent loop + MCP tools)
+backend container   (Python + FastAPI + agent loop)
     ├── port 5432 (internal) ──► postgres container  (database)
-    └── port 11434 (internal) ─► ollama container    (local AI model)
-                                 [only with --profile local]
+    ├── port 11434 (internal) ─► ollama container    (local AI model, --profile local)
+    └── port 8001 ─────────────► MCP server (NATIVE PROCESS on host machine)
+                                 runs: scripts/start-mcp.ps1 / start-mcp.sh
+                                 has full local filesystem access
 ```
 
-Each service has a name (`frontend`, `backend`, `postgres`, `ollama`). Inside Docker's private
-network, services find each other by name — not `localhost`. So the backend connects to
-`postgres:5432`, not `localhost:5432`. This is why `DATABASE_URL` in `.env.example` uses
-`@postgres:5432` not `@localhost:5432`.
+**Why the MCP server runs natively (not in Docker):**
+Docker containers are isolated from the host filesystem — they can only see paths explicitly
+mounted as volumes. The MCP server needs to scan and act on local files (Documents, Downloads,
+any path the user grants). A containerized process cannot do this without hardcoding every path
+at startup. The MCP server runs as a native Python process so it has full filesystem access,
+exactly like VS Code's language servers or Ollama running on the host.
+
+The Docker backend reaches the native MCP server via `host.docker.internal:8001` — a special
+hostname Docker provides that resolves to the host machine from inside any container.
 
 ---
 
@@ -486,16 +493,24 @@ Not planned in detail yet. Triggers when Phase 2 memory retrieval is producing v
 ## Quick Reference: Docker Commands
 
 ```bash
-# Start the full stack (cloud provider mode — no Ollama)
+# --- Starting the stack ---
+
+# Start backend services (cloud provider mode — no Ollama)
 docker compose up
 
-# Start the full stack with Ollama (local model mode)
+# Start backend services with Ollama (local model mode)
 docker compose --profile local up
 
-# Start with file-sync hot reload (after watch config is added)
+# Start the MCP server natively (REQUIRED — run in a separate terminal)
+# Windows:
+.\scripts\start-mcp.ps1
+# Mac/Linux:
+./scripts/start-mcp.sh
+
+# Start with file-sync hot reload on the backend
 docker compose watch
 
-# Rebuild images after code changes
+# Rebuild images after dependency changes
 docker compose up --build
 
 # Stop everything (data preserved)

@@ -83,6 +83,9 @@ def scan_complete_event(
     new_files: int,
     deleted_files: int,
     categories: dict[str, int],
+    root_path: str = "",
+    scan_depth: str = "DEEP",
+    top_folders: list[str] | None = None,
 ) -> str:
     return _event(
         {
@@ -93,6 +96,9 @@ def scan_complete_event(
             "new_files": new_files,
             "deleted_files": deleted_files,
             "categories": categories,
+            "root_path": root_path,
+            "scan_depth": scan_depth,
+            "top_folders": top_folders or [],
         }
     )
 
@@ -159,6 +165,9 @@ def from_payload(payload: dict[str, Any]) -> str:
             new_files=int(payload.get("new_files", 0)),
             deleted_files=int(payload.get("deleted_files", 0)),
             categories=payload.get("categories", {}) or {},
+            root_path=str(payload.get("root_path", "")),
+            scan_depth=str(payload.get("scan_depth", "DEEP")),
+            top_folders=payload.get("top_folders") or [],
         )
     if event_type == SSEEventType.ERROR.value:
         return error_event(

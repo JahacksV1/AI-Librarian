@@ -284,9 +284,9 @@ Depth of scan in `scans.scan_depth` **(Phase 1.7)**.
 
 | Value | Meaning |
 |---|---|
-| `ROOT` | Top-level folder listing only (fast, no deep traversal) |
-| `DEEP` | Full recursive scan with file metadata |
-| `CONTENT` | Deep scan plus text previews for supported files |
+| `ROOT` | Immediate children of the given path only (no recursion). Returns folder names and child counts. Used for orientation and discovery — "what is at the top level here?" |
+| `DEEP` | Full recursive walk. All file metadata (name, size, date, extension, guessed category). **No content reading.** The full inventory without opening files. |
+| `CONTENT` | Same as DEEP plus text previews (up to 512 bytes) for supported text file types. Slower. Use when the model needs to understand what is inside specific files. Always targeted to a chosen path, not the whole filesystem. |
 
 ---
 
@@ -546,13 +546,17 @@ These are the exact tool signatures the agent discovers via `tools/list`. All to
 ### scan_folder
 ```typescript
 // Input
-{ path: string, recursive: boolean, session_id: string }
+{ path: string, recursive: boolean, session_id: string, scan_depth: "ROOT" | "DEEP" | "CONTENT" }
 
 // Output
 {
-  files: Array<{ id: string, canonical_path: string, filename: string, extension: string, size_bytes: number, modified_at: string }>,
-  folders: Array<{ id: string, canonical_path: string, folder_name: string, parent_path: string }>,
-  summary: string   // e.g. "Scanned 42 files across 7 folders."
+  scan_id: string,
+  scan_depth: "ROOT" | "DEEP" | "CONTENT",
+  files: Array<{ id: string, canonical_path: string, filename: string, extension: string, size_bytes: number, modified_at: string, guessed_category: string, content_preview: string | null }>,
+  folders: Array<{ id: string, canonical_path: string, folder_name: string, parent_path: string, file_count?: number, child_count?: number }>,
+  summary: string,
+  changes: { new_files: number, deleted_files: number },
+  categories: Record<string, number>
 }
 ```
 
@@ -623,7 +627,7 @@ All SSE events arrive as `data: <json>\n\n`. Parse `type` first to determine the
 | Event | Meaning | Fields |
 |---|---|---|
 | `scan_started` | Scan begins | `scan_id`, `root_path`, `scan_depth` |
-| `scan_complete` | Scan finishes | `scan_id`, `file_count`, `folder_count`, `new_files`, `deleted_files`, `categories` |
+| `scan_complete` | Scan finishes | `scan_id`, `file_count`, `folder_count`, `new_files`, `deleted_files`, `categories`, `root_path`, `scan_depth`, `top_folders` |
 
 ```typescript
 type SSEEvent =
@@ -635,7 +639,7 @@ type SSEEvent =
   | { type: "action_executed";   action_id: string; outcome: "SUCCESS" | "FAILED"; action_type: ActionType }
   | { type: "execution_complete"; plan_id: string; succeeded: number; failed: number }
   | { type: "scan_started";       scan_id: string; root_path: string; scan_depth: string }
-  | { type: "scan_complete";     scan_id: string; file_count: number; folder_count: number; new_files: number; deleted_files: number; categories: Record<string, number> }
+  | { type: "scan_complete";     scan_id: string; file_count: number; folder_count: number; new_files: number; deleted_files: number; categories: Record<string, number>; root_path: string; scan_depth: string; top_folders: string[] }
   | { type: "error";             message: string; detail: string }
 ```
 

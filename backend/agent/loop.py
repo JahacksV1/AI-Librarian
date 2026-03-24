@@ -401,6 +401,16 @@ async def run_agent_loop(
                         )
 
                     if tool_call.name == "scan_folder" and "scan_id" in result:
+                        summary_json = result.get("summary_json") or {}
+                        top_folders: list[str] = []
+                        if isinstance(summary_json, dict):
+                            top_folders = summary_json.get("top_folders") or []
+                        # For ROOT depth, top_folders comes directly from the folders list
+                        if not top_folders and result.get("scan_depth") == "ROOT":
+                            top_folders = [
+                                f.get("canonical_path", "")
+                                for f in result.get("folders", [])[:10]
+                            ]
                         await emit_event(
                             event_callback,
                             {
@@ -411,6 +421,9 @@ async def run_agent_loop(
                                 "new_files": result.get("changes", {}).get("new_files", 0),
                                 "deleted_files": result.get("changes", {}).get("deleted_files", 0),
                                 "categories": result.get("categories", {}),
+                                "root_path": tool_call.arguments.get("path", ""),
+                                "scan_depth": result.get("scan_depth", "DEEP"),
+                                "top_folders": top_folders,
                             },
                         )
 

@@ -12,6 +12,8 @@ export interface SessionResponse {
   mode: string
   status: string
   title: string | null
+  started_at: string | null
+  updated_at: string | null
 }
 
 export interface PlanAction {
@@ -54,6 +56,7 @@ export interface ScanResponse {
   summary_json: {
     categories?: Record<string, number>
     top_folders?: string[]
+    folder_child_counts?: Record<string, number>
   } | null
 }
 

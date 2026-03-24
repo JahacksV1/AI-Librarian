@@ -26,10 +26,30 @@ mcp = FastMCP(
 
 @mcp.tool(
     name="scan_folder",
-    description="Scan a directory inside SANDBOX_ROOT and write file/folder metadata into the database.",
+    description=(
+        "Scan a directory inside SANDBOX_ROOT and write file/folder metadata into the database. "
+        "Choose scan_depth based on what you need:\n"
+        "  ROOT    — immediate children only, no file content. Fast. Use first to orient: "
+        "            'what folders exist here and how big are they?'\n"
+        "  DEEP    — full recursive walk, all file metadata (name, size, date, category). "
+        "            No content reading. The full inventory without opening files.\n"
+        "  CONTENT — same as DEEP plus text previews from supported file types. "
+        "            Slower. Use when you need to understand what is inside specific files.\n"
+        "Always start with ROOT on an unfamiliar path, then decide where to go DEEP or CONTENT."
+    ),
 )
-async def scan_folder_tool(path: str, recursive: bool = True, session_id: str = "") -> dict[str, Any]:
-    return await scan_folder(path=path, recursive=recursive, session_id=session_id)
+async def scan_folder_tool(
+    path: str,
+    session_id: str = "",
+    scan_depth: str = "DEEP",
+    recursive: bool = True,
+) -> dict[str, Any]:
+    return await scan_folder(
+        path=path,
+        recursive=recursive,
+        session_id=session_id,
+        scan_depth=scan_depth,
+    )
 
 
 @mcp.tool(

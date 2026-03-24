@@ -6,11 +6,18 @@ services:
     env_file:
       - .env
     environment:
-      - MCP_URL=http://mcp-server:8001/mcp
+      # Override the .env DATABASE_URL with the Docker-internal service name.
+      # The native MCP server uses localhost:5433 (from .env); the backend in Docker uses this.
+      - DATABASE_URL=postgresql+asyncpg://aijah:aijah@postgres:5432/aijah
+      # MCP server runs natively on the host — not in Docker.
+      # host.docker.internal resolves to the host machine from inside any Docker container.
+      # On Linux, the extra_hosts entry below makes this hostname available.
+      - MCP_URL=http://host.docker.internal:8001/mcp
+    extra_hosts:
+      # Ensures host.docker.internal works on Linux (automatic on Mac and Windows).
+      - "host.docker.internal:host-gateway"
     depends_on:
       postgres:
-        condition: service_healthy
-      mcp-server:
         condition: service_healthy
     develop:
       watch:
@@ -19,41 +26,6 @@ services:
           target: /app
         - action: rebuild
           path: ./backend/requirements.txt
-
-  mcp-server:
-    build: ./backend
-    command: ["python", "mcp_server.py"]
-    ports:
-      - "8001:8001"
-    volumes:
-      - ./sandbox:/sandbox
-    env_file:
-      - .env
-    depends_on:
-      postgres:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8001/health', timeout=2)\" 2>/dev/null || exit 1"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
-
-  test:
-    build: ./backend
-    command: ["python", "test_v1.py"]
-    volumes:
-      - .:/workspace
-    working_dir: /workspace
-    environment:
-      - BASE_URL=http://backend:8000
-    env_file:
-      - .env
-    depends_on:
-      backend:
-        condition: service_started
-    profiles:
-      - test
 
   frontend:
     build:
@@ -81,6 +53,22 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+
+  test:
+    build: ./backend
+    command: ["python", "test_v1.py"]
+    volumes:
+      - .:/workspace
+    working_dir: /workspace
+    environment:
+      - BASE_URL=http://backend:8000
+    env_file:
+      - .env
+    depends_on:
+      backend:
+        condition: service_started
+    profiles:
+      - test
 
   # Ollama is only needed when MODEL_PROVIDER=ollama.
   # Start with:  docker compose --profile local up

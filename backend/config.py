@@ -1,8 +1,14 @@
+from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Resolve .env from the project root (one level above this file's directory).
+# This works whether mcp_server.py is run natively from the backend/ folder
+# or whether settings are injected as real environment variables by Docker Compose.
+_ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=str(_ENV_PATH), extra="ignore")
 
     # --- Database ---
     database_url: str

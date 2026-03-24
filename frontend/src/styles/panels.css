@@ -295,6 +295,48 @@
   border-bottom: 1px solid var(--border);
 }
 
+.scan-header-left {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.scan-root-path {
+  font-size: 12px;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scan-header-badges {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.badge-depth {
+  font-size: 10px;
+  padding: 2px 7px;
+}
+
+.badge-depth-root {
+  background: #ede9fe;
+  color: #5b21b6;
+}
+
+.badge-depth-deep {
+  background: #dbeafe;
+  color: #1e40af;
+}
+
+.badge-depth-content {
+  background: #fce7f3;
+  color: #9d174d;
+}
+
 .scan-progress {
   display: flex;
   align-items: center;
@@ -370,6 +412,43 @@
 .scan-cat-count {
   font-weight: 600;
   color: var(--muted);
+}
+
+/* Folder list for ROOT scan */
+
+.scan-folder-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.scan-folder-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  font-size: 13px;
+  transition: background 0.1s;
+}
+
+.scan-folder-item:hover {
+  background: #f1f5f9;
+}
+
+.scan-folder-icon {
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+.scan-folder-name {
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .badge {
