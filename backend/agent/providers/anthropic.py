@@ -94,6 +94,15 @@ class AnthropicProvider(ModelProvider):
         )
 
 
+def _tool_result_block(msg: dict[str, Any]) -> dict[str, Any]:
+    """Single Anthropic tool_result content block."""
+    return {
+        "type": "tool_result",
+        "tool_use_id": msg.get("tool_call_id", ""),
+        "content": msg.get("content", ""),
+    }
+
+
 def _split_system_messages(
     messages: list[dict[str, Any]],
 ) -> tuple[str, list[dict[str, Any]]]:
@@ -102,19 +111,36 @@ def _split_system_messages(
     Anthropic expects the system prompt as a top-level parameter, not in the
     messages array.  Our internal format (from context.py) puts system content
     as {"role": "system", ...} entries.
+
+    When the assistant message contains multiple tool_use blocks, Anthropic
+    requires the next message to be a *single* user turn whose content is *all*
+    matching tool_result blocks.  We store each tool output as its own
+    ``role: tool`` row; merging consecutive tool rows into one user message
+    avoids ``unexpected tool_use_id`` 400 errors on multi-tool turns.
     """
     system_parts: list[str] = []
     api_messages: list[dict[str, Any]] = []
 
-    for msg in messages:
-        if msg.get("role") == "system":
+    i = 0
+    n = len(messages)
+    while i < n:
+        msg = messages[i]
+        role = msg.get("role")
+
+        if role == "system":
             system_parts.append(msg.get("content", ""))
-        elif msg.get("role") == "tool":
-            api_messages.append(_convert_tool_result_message(msg))
-        elif msg.get("role") == "assistant" and msg.get("tool_calls"):
+        elif role == "tool":
+            blocks: list[dict[str, Any]] = []
+            while i < n and messages[i].get("role") == "tool":
+                blocks.append(_tool_result_block(messages[i]))
+                i += 1
+            api_messages.append({"role": "user", "content": blocks})
+            continue
+        elif role == "assistant" and msg.get("tool_calls"):
             api_messages.append(_convert_assistant_tool_call_message(msg))
         else:
             api_messages.append({"role": msg["role"], "content": msg.get("content", "")})
+        i += 1
 
     return "\n\n".join(system_parts), api_messages
 
@@ -147,24 +173,6 @@ def _convert_assistant_tool_call_message(msg: dict[str, Any]) -> dict[str, Any]:
         })
 
     return {"role": "assistant", "content": content_blocks}
-
-
-def _convert_tool_result_message(msg: dict[str, Any]) -> dict[str, Any]:
-    """Convert an OpenAI-style tool result to Anthropic format.
-
-    OpenAI:    {"role": "tool", "content": "...", "tool_call_id": "..."}
-    Anthropic: {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "...", "content": "..."}]}
-    """
-    return {
-        "role": "user",
-        "content": [
-            {
-                "type": "tool_result",
-                "tool_use_id": msg.get("tool_call_id", ""),
-                "content": msg.get("content", ""),
-            }
-        ],
-    }
 
 
 def _convert_tool_schema(tool: dict[str, Any]) -> dict[str, Any]:

@@ -192,6 +192,21 @@ export function useSSE({
     setMessages(seed)
   }, [])
 
+  /** After a failed stream or SSE error: reset UI so the user can send again without a full page reload. */
+  const clearStreamError = useCallback(() => {
+    setError(null)
+    activeAssistantId.current = null
+    setUiStateSafe('idle')
+    setMessages((prev) => {
+      if (prev.length === 0) return prev
+      const last = prev[prev.length - 1]
+      if (last.role === 'assistant' && !last.content.trim()) {
+        return prev.slice(0, -1)
+      }
+      return prev
+    })
+  }, [setUiStateSafe])
+
   return {
     messages,
     uiState,
@@ -200,5 +215,6 @@ export function useSSE({
     runExecution,
     seedMessages,
     setUiState: setUiStateSafe,
+    clearStreamError,
   }
 }

@@ -340,6 +340,18 @@ async def run_agent_loop(
                         tool_call.arguments["session_id"] = session_id
 
                     await _update_state_for_tool_start(session_id, tool_call.name)
+
+                    if tool_call.name == "scan_folder":
+                        await emit_event(
+                            event_callback,
+                            {
+                                "type": SSEEventType.SCAN_STARTED.value,
+                                "scan_id": "",
+                                "root_path": tool_call.arguments.get("path", ""),
+                                "scan_depth": tool_call.arguments.get("scan_depth", "DEEP"),
+                            },
+                        )
+
                     try:
                         result = await _call_tool(client, tool_call)
                     except Exception as exc:
@@ -385,6 +397,20 @@ async def run_agent_loop(
                                 "plan_id": result["plan_id"],
                                 "goal": tool_call.arguments.get("goal", ""),
                                 "action_count": result.get("action_count", 0),
+                            },
+                        )
+
+                    if tool_call.name == "scan_folder" and "scan_id" in result:
+                        await emit_event(
+                            event_callback,
+                            {
+                                "type": SSEEventType.SCAN_COMPLETE.value,
+                                "scan_id": result.get("scan_id", ""),
+                                "file_count": len(result.get("files", [])),
+                                "folder_count": len(result.get("folders", [])),
+                                "new_files": result.get("changes", {}).get("new_files", 0),
+                                "deleted_files": result.get("changes", {}).get("deleted_files", 0),
+                                "categories": result.get("categories", {}),
                             },
                         )
 

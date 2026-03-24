@@ -5,6 +5,7 @@ interface AppShellProps {
   statusLabel: string
   statusTone: string
   onRetry: () => void
+  retryLabel?: string
   leftPanel: ReactNode
   rightPanel: ReactNode
   bottomPanel: ReactNode
@@ -14,6 +15,7 @@ export function AppShell({
   statusLabel,
   statusTone,
   onRetry,
+  retryLabel,
   leftPanel,
   rightPanel,
   bottomPanel,
@@ -67,7 +69,7 @@ export function AppShell({
 
   return (
     <div className="app" ref={rootRef}>
-      <StatusBar label={statusLabel} tone={statusTone} onRetry={onRetry} />
+      <StatusBar label={statusLabel} tone={statusTone} onRetry={onRetry} retryLabel={retryLabel} />
 
       <main className="workspace">
         <section className="top-grid">

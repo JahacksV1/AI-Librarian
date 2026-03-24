@@ -17,6 +17,7 @@ from db.models import (
     OperationalPolicy,
     Plan,
     PlanAction,
+    Scan,
     Session,
     SessionMessage,
     TaskState,
@@ -157,6 +158,27 @@ def _format_active_plan(plan: Plan, actions: list[PlanAction]) -> str | None:
     return "\n".join(lines)
 
 
+def _format_last_scan(scan: Scan | None) -> str | None:
+    if scan is None:
+        return None
+
+    lines = [
+        "Last scan:",
+        f"  Scanned {scan.root_path} at {scan.started_at.isoformat() if scan.started_at else '?'}"
+        f" (depth: {scan.scan_depth.value}, {'recursive' if scan.recursive else 'non-recursive'})",
+        f"  Found: {scan.file_count or 0} files across {scan.folder_count or 0} folders",
+        f"  Changes: {scan.new_files or 0} new, {scan.deleted_files or 0} deleted, {scan.modified_files or 0} modified",
+    ]
+
+    if scan.summary_json and isinstance(scan.summary_json, dict):
+        categories = scan.summary_json.get("categories")
+        if categories and isinstance(categories, dict):
+            parts = [f"{cat} ({count})" for cat, count in categories.items()]
+            lines.append(f"  Categories: {', '.join(parts)}")
+
+    return "\n".join(lines)
+
+
 def _session_message_to_dict(message: SessionMessage) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "role": message.role.value.lower(),
@@ -170,7 +192,25 @@ def _session_message_to_dict(message: SessionMessage) -> dict[str, Any]:
         payload["tool_call_id"] = message.tool_call_id
 
     if message.metadata_json:
-        payload["metadata"] = message.metadata_json
+        raw_tcs = message.metadata_json.get("tool_calls")
+        if raw_tcs:
+            # Hoist tool_calls to top level in OpenAI function-call envelope format
+            # so that AnthropicProvider._split_system_messages can find and convert them.
+            # Stored format: {"id": "...", "name": "...", "arguments": {...}}
+            # Expected format: {"id": "...", "type": "function", "function": {"name": "...", "arguments": {...}}}
+            payload["tool_calls"] = [
+                {
+                    "id": tc.get("id", ""),
+                    "type": "function",
+                    "function": {
+                        "name": tc.get("name", ""),
+                        "arguments": tc.get("arguments", {}),
+                    },
+                }
+                for tc in raw_tcs
+            ]
+        else:
+            payload["metadata"] = message.metadata_json
 
     return payload
 
@@ -186,6 +226,7 @@ class ContextPacket:
     task_state_text: str | None = None
     recent_memories_text: str | None = None
     active_plan_text: str | None = None
+    last_scan_text: str | None = None
     conversation_messages: list[dict[str, Any]] = field(default_factory=list)
 
     def to_messages(self) -> list[dict[str, Any]]:
@@ -206,6 +247,9 @@ class ContextPacket:
         if self.active_plan_text:
             messages.append({"role": "system", "content": self.active_plan_text})
 
+        if self.last_scan_text:
+            messages.append({"role": "system", "content": self.last_scan_text})
+
         messages.extend(self.conversation_messages)
         return messages
 
@@ -220,6 +264,7 @@ class ContextPacket:
             "has_task_state": self.task_state_text is not None,
             "has_recent_memories": self.recent_memories_text is not None,
             "has_active_plan": self.active_plan_text is not None,
+            "has_last_scan": self.last_scan_text is not None,
         }
 
 
@@ -285,6 +330,13 @@ async def assemble_context(session_id: str) -> ContextPacket:
                     )
                 )
 
+        last_scan: Scan | None = await session.scalar(
+            select(Scan)
+            .where(Scan.session_id == session_uuid)
+            .order_by(Scan.started_at.desc())
+            .limit(1)
+        )
+
     return ContextPacket(
         session_id=str(session_row.id),
         user_id=str(session_row.user_id),
@@ -295,5 +347,6 @@ async def assemble_context(session_id: str) -> ContextPacket:
         task_state_text=_format_task_state(task_state),
         recent_memories_text=_format_recent_memory_events(recent_events),
         active_plan_text=_format_active_plan(active_plan, active_plan_actions) if active_plan else None,
+        last_scan_text=_format_last_scan(last_scan),
         conversation_messages=[_session_message_to_dict(message) for message in conversation_rows],
     )

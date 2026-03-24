@@ -23,21 +23,31 @@ export function PlanPanel({
   onExecute,
 }: PlanPanelProps) {
   if (error) {
-    return <div className="panel-empty">Plan error: {error}</div>
+    return (
+      <div className="plan-panel-root">
+        <div className="panel-empty">Plan error: {error}</div>
+      </div>
+    )
   }
 
   if (!plan) {
-    return <div className="panel-empty">{status === 'loading' ? 'Loading plan...' : 'No plan yet.'}</div>
+    return (
+      <div className="plan-panel-root plan-panel-root--empty">
+        <div className="panel-empty">{status === 'loading' ? 'Loading plan...' : 'No plan yet.'}</div>
+      </div>
+    )
   }
 
   return (
-    <PlanCard
-      plan={plan}
-      disabled={disabled}
-      onApproveAction={onApproveAction}
-      onRejectAction={onRejectAction}
-      onApproveAll={onApproveAll}
-      onExecute={onExecute}
-    />
+    <div className="plan-panel-root">
+      <PlanCard
+        plan={plan}
+        disabled={disabled}
+        onApproveAction={onApproveAction}
+        onRejectAction={onRejectAction}
+        onApproveAll={onApproveAll}
+        onExecute={onExecute}
+      />
+    </div>
   )
 }

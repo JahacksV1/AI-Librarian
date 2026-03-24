@@ -20,27 +20,29 @@ export function PlanCard({
 }: PlanCardProps) {
   return (
     <div className="panel-content plan-card">
-      <div className="panel-header">
-        <h2>Current Plan</h2>
-        <span className="badge" data-status={plan.status}>{plan.status}</span>
+      <div className="plan-card-scroll">
+        <div className="panel-header">
+          <h2>Current Plan</h2>
+          <span className="badge" data-status={plan.status}>{plan.status}</span>
+        </div>
+
+        <p className="goal">{plan.goal}</p>
+        <p className="rationale">{plan.rationale_summary}</p>
+
+        <ul className="action-list">
+          {plan.actions.map((action) => (
+            <ActionRow
+              key={action.id}
+              action={action}
+              disabled={disabled}
+              onApprove={onApproveAction}
+              onReject={onRejectAction}
+            />
+          ))}
+        </ul>
       </div>
 
-      <p className="goal">{plan.goal}</p>
-      <p className="rationale">{plan.rationale_summary}</p>
-
-      <ul className="action-list">
-        {plan.actions.map((action) => (
-          <ActionRow
-            key={action.id}
-            action={action}
-            disabled={disabled}
-            onApprove={onApproveAction}
-            onReject={onRejectAction}
-          />
-        ))}
-      </ul>
-
-      <div className="panel-actions">
+      <div className="plan-actions-bar panel-actions">
         <button type="button" className="btn" disabled={disabled} onClick={() => void onApproveAll()}>
           Approve All
         </button>

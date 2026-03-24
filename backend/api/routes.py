@@ -16,7 +16,7 @@ from api.sse import action_executed_event, error_event, execution_complete_event
 from config import settings
 from db.connection import db_manager
 from db.enums import ActionStatus, PlanStatus, SessionMode, SessionState, SessionStatus
-from db.models import Device, FileEntity, Plan, PlanAction, Session, SessionMessage, TaskState
+from db.models import Device, FileEntity, FolderEntity, Plan, PlanAction, Scan, Session, SessionMessage, TaskState
 from db.utils import recompute_plan_status
 from tools.scan_folder import scan_folder
 
@@ -466,6 +466,117 @@ async def execute_plan(plan_id: str) -> StreamingResponse:
     return StreamingResponse(_event_stream(), media_type="text/event-stream")
 
 
+@router.get("/scans")
+async def list_scans(session_id: str = Query(...)) -> dict[str, Any]:
+    try:
+        session_uuid = uuid.UUID(session_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid session_id UUID.") from exc
+
+    async with db_manager.session() as session:
+        scan_rows = list(
+            await session.scalars(
+                select(Scan)
+                .where(Scan.session_id == session_uuid)
+                .order_by(Scan.started_at.desc(), Scan.id.desc())
+            )
+        )
+
+    return {
+        "scans": [
+            {
+                "id": str(s.id),
+                "session_id": str(s.session_id) if s.session_id else None,
+                "device_id": str(s.device_id),
+                "root_path": s.root_path,
+                "scan_depth": s.scan_depth.value,
+                "recursive": s.recursive,
+                "file_count": s.file_count,
+                "folder_count": s.folder_count,
+                "new_files": s.new_files,
+                "deleted_files": s.deleted_files,
+                "modified_files": s.modified_files,
+                "started_at": s.started_at.isoformat() if s.started_at else None,
+                "completed_at": s.completed_at.isoformat() if s.completed_at else None,
+                "status": s.status.value,
+                "summary_json": s.summary_json,
+            }
+            for s in scan_rows
+        ]
+    }
+
+
+@router.get("/scans/{scan_id}")
+async def get_scan(scan_id: str) -> dict[str, Any]:
+    try:
+        scan_uuid = uuid.UUID(scan_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid scan_id UUID.") from exc
+
+    async with db_manager.session() as session:
+        scan_row = await session.get(Scan, scan_uuid)
+        if scan_row is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scan not found.")
+
+    return {
+        "id": str(scan_row.id),
+        "session_id": str(scan_row.session_id) if scan_row.session_id else None,
+        "device_id": str(scan_row.device_id),
+        "root_path": scan_row.root_path,
+        "scan_depth": scan_row.scan_depth.value,
+        "recursive": scan_row.recursive,
+        "file_count": scan_row.file_count,
+        "folder_count": scan_row.folder_count,
+        "new_files": scan_row.new_files,
+        "deleted_files": scan_row.deleted_files,
+        "modified_files": scan_row.modified_files,
+        "started_at": scan_row.started_at.isoformat() if scan_row.started_at else None,
+        "completed_at": scan_row.completed_at.isoformat() if scan_row.completed_at else None,
+        "status": scan_row.status.value,
+        "summary_json": scan_row.summary_json,
+    }
+
+
+@router.get("/folders")
+async def list_folders(
+    device_id: str | None = Query(default=None),
+    path_prefix: str | None = Query(default=None),
+    exists_now: bool = Query(default=True),
+) -> dict[str, Any]:
+    filters = [FolderEntity.exists_now.is_(exists_now)]
+
+    if device_id is not None:
+        try:
+            filters.append(FolderEntity.device_id == uuid.UUID(device_id))
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid device_id UUID.") from exc
+
+    if path_prefix:
+        filters.append(FolderEntity.canonical_path.like(f"{path_prefix}%"))
+
+    async with db_manager.session() as session:
+        folder_rows = list(
+            await session.scalars(
+                select(FolderEntity)
+                .where(*filters)
+                .order_by(FolderEntity.canonical_path.asc(), FolderEntity.id.asc())
+            )
+        )
+
+    return {
+        "folders": [
+            {
+                "id": str(f.id),
+                "canonical_path": f.canonical_path,
+                "folder_name": f.folder_name,
+                "parent_path": f.parent_path,
+                "exists_now": f.exists_now,
+            }
+            for f in folder_rows
+        ]
+    }
+
+
 @router.post("/scan")
 async def scan_filesystem(body: ScanRequest) -> dict[str, Any]:
     result = await scan_folder(
@@ -517,6 +628,8 @@ async def list_files(
                 "size_bytes": file_row.size_bytes,
                 "exists_now": file_row.exists_now,
                 "modified_at": file_row.modified_at.isoformat() if file_row.modified_at else None,
+                "guessed_category": file_row.guessed_category,
+                "content_preview": file_row.content_preview,
             }
             for file_row in file_rows
         ]
