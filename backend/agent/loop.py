@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
+from contextlib import asynccontextmanager
 from typing import Any
-
-from fastmcp import Client
 
 from agent.context import assemble_context
 from agent.providers import get_provider
@@ -26,6 +26,7 @@ from mcp_server import mcp
 log = logging.getLogger(__name__)
 
 MAX_TOOL_ITERATIONS = 10
+TOOL_TIMEOUT_SECONDS = 60  # Maximum wall-clock time allowed for any single tool call
 
 # --- Tool Dispatch Contract (see docs/TOOL_DISPATCH.md) ---
 # Parameters the agent loop injects from session context.
@@ -41,25 +42,18 @@ TOOLS_REQUIRING_SESSION_ID = frozenset({
 
 
 _TOOL_SCHEMAS_CACHE: list[dict[str, Any]] | None = None
-_MCP_CLIENT: Client | None = None
-
-
-def _get_mcp_client() -> Client:
-    global _MCP_CLIENT
-    if _MCP_CLIENT is None:
-        if settings.mcp_url:
-            # Extracted MCP server — connect over HTTP.
-            _MCP_CLIENT = Client(settings.mcp_url)
-        else:
-            # In-process MCP (local dev without Docker).
-            _MCP_CLIENT = Client(mcp)
-    return _MCP_CLIENT
 
 
 def _tool_to_function_schema(tool: Any) -> dict[str, Any]:
     name = getattr(tool, "name", "")
     description = getattr(tool, "description", "") or ""
-    input_schema = getattr(tool, "inputSchema", None) or getattr(tool, "input_schema", None)
+    # In-process FastMCP 3.x uses .parameters; HTTP client MCP protocol uses .inputSchema
+    input_schema = (
+        getattr(tool, "parameters", None)
+        or getattr(tool, "inputSchema", None)
+        or getattr(tool, "input_schema", None)
+        or {}
+    )
     if not isinstance(input_schema, dict):
         input_schema = {"type": "object", "properties": {}, "required": []}
     if "type" not in input_schema:
@@ -93,12 +87,22 @@ def _tool_to_function_schema(tool: Any) -> dict[str, Any]:
 
 
 async def initialize_mcp_tool_cache() -> None:
+    """Build the tool schema cache.
+
+    When MCP_URL is set (Docker): connect to the external native MCP server via HTTP.
+    When MCP_URL is empty (local dev): use the server object directly — avoids the
+    FastMCP 3.x in-process Client deadlock.
+    """
     global _TOOL_SCHEMAS_CACHE
-    if _TOOL_SCHEMAS_CACHE is None:
-        client = _get_mcp_client()
-        async with client:
+    if _TOOL_SCHEMAS_CACHE is not None:
+        return
+    if settings.mcp_url:
+        from fastmcp import Client
+        async with Client(settings.mcp_url) as client:
             tools = await client.list_tools()
-        _TOOL_SCHEMAS_CACHE = [_tool_to_function_schema(tool) for tool in tools]
+    else:
+        tools = await mcp.list_tools()
+    _TOOL_SCHEMAS_CACHE = [_tool_to_function_schema(tool) for tool in tools]
 
 
 def get_cached_tool_schemas() -> list[dict[str, Any]]:
@@ -199,6 +203,10 @@ async def _update_state_for_tool_result(session_id: str, tool_name: str, result:
 
 
 def _normalize_tool_result(result: Any) -> dict[str, Any]:
+    # FastMCP 3.x ToolResult (in-process) — structured_content is already a dict
+    if hasattr(result, "structured_content") and isinstance(result.structured_content, dict):
+        return result.structured_content
+
     if isinstance(result, dict):
         return result
 
@@ -215,17 +223,56 @@ def _normalize_tool_result(result: Any) -> dict[str, Any]:
                 return dumped["data"]
             return dumped
 
-    if isinstance(result, list):
-        return {"content": result}
+    # FastMCP ToolResult with content list (may appear from HTTP client or in-process)
+    content_list = None
+    if hasattr(result, "content") and isinstance(result.content, list):
+        content_list = result.content
+    elif isinstance(result, list):
+        content_list = result
+
+    if content_list:
+        first = content_list[0] if content_list else None
+        text = getattr(first, "text", None) if first else None
+        if text:
+            try:
+                parsed = json.loads(text)
+                if isinstance(parsed, dict):
+                    return parsed
+            except (json.JSONDecodeError, ValueError):
+                return {"result": text}
 
     return {"result": str(result)}
 
 
-async def _call_tool(mcp_client: Client, tool_call: ToolCall) -> dict[str, Any]:
-    call_result = await mcp_client.call_tool(
-        tool_call.name,
-        arguments=tool_call.arguments or {},
-    )
+@asynccontextmanager
+async def _tool_client():
+    """Yield an HTTP client when MCP_URL is configured, else None (direct in-process)."""
+    if settings.mcp_url:
+        from fastmcp import Client
+        async with Client(settings.mcp_url) as client:
+            yield client
+    else:
+        yield None
+
+
+async def _call_tool(tool_call: ToolCall, http_client: Any = None) -> dict[str, Any]:
+    """Dispatch a tool call via HTTP (Docker) or directly in-process (local dev)."""
+    try:
+        if http_client is not None:
+            call_result = await asyncio.wait_for(
+                http_client.call_tool(tool_call.name, arguments=tool_call.arguments or {}),
+                timeout=TOOL_TIMEOUT_SECONDS,
+            )
+        else:
+            call_result = await asyncio.wait_for(
+                mcp.call_tool(tool_call.name, arguments=tool_call.arguments or {}),
+                timeout=TOOL_TIMEOUT_SECONDS,
+            )
+    except asyncio.TimeoutError:
+        return {
+            "error": "timeout",
+            "message": f"Tool '{tool_call.name}' exceeded {TOOL_TIMEOUT_SECONDS}s time limit.",
+        }
     return _normalize_tool_result(call_result)
 
 
@@ -263,8 +310,7 @@ async def run_agent_loop(
 
     provider = get_provider()
 
-    client = _get_mcp_client()
-    async with client:
+    async with _tool_client() as http_client:
         for iteration in range(1, MAX_TOOL_ITERATIONS + 1):
             try:
                 turn = await provider.chat_stream(
@@ -353,22 +399,25 @@ async def run_agent_loop(
                         )
 
                     try:
-                        result = await _call_tool(client, tool_call)
+                        result = await _call_tool(tool_call, http_client=http_client)
                     except Exception as exc:
+                        error_detail = str(exc)
                         await update_task_state(
                             session_id=session_id,
                             current_step=SessionState.ERROR.value,
-                            scratchpad_summary=str(exc),
+                            scratchpad_summary=error_detail,
                         )
                         await emit_event(
                             event_callback,
                             {
                                 "type": SSEEventType.ERROR.value,
                                 "message": f"Tool call failed: {tool_call.name}",
-                                "detail": str(exc),
+                                "detail": error_detail,
                             },
                         )
-                        raise
+                        # Feed the error back to the model as a tool result so it
+                        # can recover rather than crashing the entire loop.
+                        result = {"error": "tool_call_failed", "message": error_detail}
 
                     log.info(
                         "agent_loop.tool_result",
@@ -411,13 +460,22 @@ async def run_agent_loop(
                                 f.get("canonical_path", "")
                                 for f in result.get("folders", [])[:10]
                             ]
+                        # DEEP/CONTENT: top_folders from folder payloads sorted by file_count
+                        if not top_folders and result.get("scan_depth") in ("DEEP", "CONTENT"):
+                            top_folders = [
+                                f.get("canonical_path", "")
+                                for f in result.get("folders", [])[:10]
+                            ]
+                        # file_count: ROOT returns files[], DEEP/CONTENT returns file_count int
+                        raw_files = result.get("files", [])
+                        file_count = result.get("file_count", len(raw_files))
                         await emit_event(
                             event_callback,
                             {
                                 "type": SSEEventType.SCAN_COMPLETE.value,
                                 "scan_id": result.get("scan_id", ""),
-                                "file_count": len(result.get("files", [])),
-                                "folder_count": len(result.get("folders", [])),
+                                "file_count": file_count,
+                                "folder_count": result.get("folder_count", len(result.get("folders", []))),
                                 "new_files": result.get("changes", {}).get("new_files", 0),
                                 "deleted_files": result.get("changes", {}).get("deleted_files", 0),
                                 "categories": result.get("categories", {}),

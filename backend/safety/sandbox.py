@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -119,6 +120,63 @@ class SandboxService:
             exists=True,
             is_dir=path.is_dir(),
         )
+
+
+def walk_filesystem(
+    directory: Path,
+    recursive: bool,
+    max_files: int,
+) -> tuple[list[Path], list[Path], bool]:
+    """Blocking filesystem walk suitable for use with asyncio.to_thread.
+
+    Returns (files, folders, truncated).  Stops collecting files once
+    max_files is reached and sets truncated=True so callers can inform
+    the user that the result is partial.  Uses os.scandir for efficient
+    batched syscalls and handles permission errors gracefully.
+    """
+    files: list[Path] = []
+    folders: list[Path] = [directory]
+    truncated = False
+
+    if recursive:
+        stack: list[Path] = [directory]
+        while stack:
+            current = stack.pop()
+            try:
+                with os.scandir(current) as it:
+                    for entry in it:
+                        try:
+                            if entry.is_dir(follow_symlinks=False):
+                                p = Path(entry.path)
+                                folders.append(p)
+                                stack.append(p)
+                            elif entry.is_file(follow_symlinks=False):
+                                if len(files) >= max_files:
+                                    truncated = True
+                                    return files, folders, truncated
+                                files.append(Path(entry.path))
+                        except (PermissionError, OSError):
+                            continue
+            except (PermissionError, OSError):
+                continue
+    else:
+        try:
+            with os.scandir(directory) as it:
+                for entry in it:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            folders.append(Path(entry.path))
+                        elif entry.is_file(follow_symlinks=False):
+                            if len(files) >= max_files:
+                                truncated = True
+                                break
+                            files.append(Path(entry.path))
+                    except (PermissionError, OSError):
+                        continue
+        except (PermissionError, OSError):
+            pass
+
+    return files, folders, truncated
 
 
 sandbox_service = SandboxService(settings.sandbox_root)

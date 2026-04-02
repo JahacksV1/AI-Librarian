@@ -53,8 +53,14 @@ async def lifespan(_: FastAPI):
     await db_manager.healthcheck()
     log.info("startup: DB connected")
     log.info("startup: initializing MCP tool cache...")
-    await initialize_mcp_tool_cache()
-    log.info("startup: MCP tool cache ready")
+    try:
+        await initialize_mcp_tool_cache()
+        log.info("startup: MCP tool cache ready")
+    except Exception as exc:
+        # Non-fatal: if MCP server isn't up yet the cache will initialize
+        # lazily on the first agent request. This lets the backend start
+        # even when the native MCP server is not yet running.
+        log.warning("startup: MCP tool cache deferred — %s", exc)
     yield
     log.info("shutdown: complete")
 

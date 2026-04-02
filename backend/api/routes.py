@@ -11,7 +11,8 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
-from agent.loop import _get_mcp_client, run_agent_loop
+from agent.loop import run_agent_loop
+from mcp_server import mcp as _mcp_server
 from api.sse import action_executed_event, error_event, execution_complete_event, from_payload
 from config import settings
 from db.connection import db_manager
@@ -421,14 +422,22 @@ async def execute_plan(plan_id: str) -> StreamingResponse:
             return
 
         for action in approved_actions:
-            mcp_client = _get_mcp_client()
-            async with mcp_client:
-                call_result = await mcp_client.call_tool(
+            if settings.mcp_url:
+                from fastmcp import Client
+                async with Client(settings.mcp_url) as _client:
+                    call_result = await _client.call_tool(
+                        "execute_action",
+                        arguments={"action_id": str(action.id)},
+                    )
+            else:
+                call_result = await _mcp_server.call_tool(
                     "execute_action",
                     arguments={"action_id": str(action.id)},
                 )
-            # Unwrap FastMCP result envelope
-            if hasattr(call_result, "data") and isinstance(call_result.data, dict):
+            # Unwrap FastMCP ToolResult / HTTP result envelope
+            if hasattr(call_result, "structured_content") and isinstance(call_result.structured_content, dict):
+                result = call_result.structured_content
+            elif hasattr(call_result, "data") and isinstance(call_result.data, dict):
                 result = call_result.data
             elif isinstance(call_result, dict):
                 result = call_result
