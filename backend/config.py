@@ -44,7 +44,7 @@ class Settings(BaseSettings):
 
         defaults = {
             "ollama": self.ollama_model or "qwen2.5",
-            "anthropic": "claude-sonnet-4-20250514",
+            "anthropic": "claude-3-5-haiku-20241022",
             "openai": "gpt-4o",
         }
         return defaults.get(self.model_provider.lower(), self.model_provider)

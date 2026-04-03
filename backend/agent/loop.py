@@ -168,7 +168,13 @@ def _assistant_tool_call_message(tool_calls: list[ToolCall], content: str) -> di
                 "type": "function",
                 "function": {
                     "name": tool_call.name,
-                    "arguments": tool_call.arguments,
+                    # Must be a JSON string for OpenAI's API (Anthropic's converter
+                    # already handles both str and dict, so this is safe for both).
+                    "arguments": (
+                        json.dumps(tool_call.arguments)
+                        if isinstance(tool_call.arguments, dict)
+                        else tool_call.arguments
+                    ),
                 },
             }
             for tool_call in tool_calls
@@ -393,18 +399,22 @@ async def run_agent_loop(
             if turn.tool_calls:
                 messages.append(_assistant_tool_call_message(turn.tool_calls, turn.content))
 
-                if turn.content:
-                    assistant_message_id = await _persist_message(
-                        session_id=session_id,
-                        role=RoleType.ASSISTANT,
-                        content=turn.content,
-                        metadata_json={
-                            "tool_calls": [
-                                {"id": tool_call.id, "name": tool_call.name, "arguments": tool_call.arguments}
-                                for tool_call in turn.tool_calls
-                            ]
-                        },
-                    )
+                # Always persist the assistant tool-call envelope, even when the
+                # model produced no accompanying text.  The DB must have this row
+                # so that every tool-result row has a valid preceding assistant
+                # message with tool_calls — OpenAI (and the windowing logic) both
+                # require this ordering on replay.
+                assistant_message_id = await _persist_message(
+                    session_id=session_id,
+                    role=RoleType.ASSISTANT,
+                    content=turn.content,
+                    metadata_json={
+                        "tool_calls": [
+                            {"id": tool_call.id, "name": tool_call.name, "arguments": tool_call.arguments}
+                            for tool_call in turn.tool_calls
+                        ]
+                    },
+                )
 
                 for tool_call in turn.tool_calls:
                     tool_calls_executed += 1

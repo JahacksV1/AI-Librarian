@@ -365,7 +365,15 @@ def _session_message_to_dict(message: SessionMessage) -> dict[str, Any]:
                     "type": "function",
                     "function": {
                         "name": tc.get("name", ""),
-                        "arguments": tc.get("arguments", {}),
+                        # OpenAI (and OpenAI-format APIs) require arguments to be a
+                        # JSON *string*, not an object.  The stored value is a dict;
+                        # serialize it so both OpenAI and Anthropic providers receive
+                        # the correct wire format.
+                        "arguments": (
+                            json.dumps(tc["arguments"])
+                            if isinstance(tc.get("arguments"), dict)
+                            else (tc.get("arguments") or "{}")
+                        ),
                     },
                 }
                 for tc in raw_tcs

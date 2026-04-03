@@ -6,6 +6,7 @@ export interface ConversationMessage {
   payload?: unknown
   toolName?: string
   isResult?: boolean
+  toolArgs?: Record<string, unknown>
 }
 
 export interface ActivityEntry {

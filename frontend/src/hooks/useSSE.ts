@@ -28,6 +28,9 @@ export function useSSE({
 
   const activeAssistantId = useRef<string | null>(null)
   const uiStateRef = useRef<UIState>('idle')
+  // Track the most recent args for each tool call so tool_result messages
+  // can surface them in the UI (e.g. RetrievalResultCard uses them for labels).
+  const pendingToolArgsRef = useRef<Record<string, Record<string, unknown>>>({})
 
   const setUiStateSafe = useCallback((next: UIState) => {
     uiStateRef.current = next
@@ -53,6 +56,8 @@ export function useSSE({
           break
         case 'tool_call':
           setUiStateSafe(event.tool === 'scan_folder' ? 'scanning' : uiStateRef.current)
+          // Stash the args so the matching tool_result message can use them.
+          pendingToolArgsRef.current[event.tool] = event.args as Record<string, unknown>
           setMessages((prev) => [
             ...prev,
             {
@@ -77,6 +82,7 @@ export function useSSE({
               payload: event.result,
               toolName: event.tool,
               isResult: true,
+              toolArgs: pendingToolArgsRef.current[event.tool],
             },
           ])
           break

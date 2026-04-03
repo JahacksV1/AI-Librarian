@@ -34,14 +34,14 @@ _CATEGORY_KEYWORDS: list[tuple[str, list[str]]] = [
 ]
 
 _EXT_CATEGORY_MAP: dict[str, str] = {
-    ".pdf": "document", ".doc": "document", ".docx": "document",
-    ".xls": "spreadsheet", ".xlsx": "spreadsheet",
-    ".ppt": "presentation", ".pptx": "presentation",
-    ".jpg": "photo", ".jpeg": "photo", ".png": "photo",
-    ".gif": "photo", ".webp": "photo", ".heic": "photo",
-    ".mp4": "video", ".mov": "video", ".avi": "video",
-    ".mp3": "audio", ".wav": "audio", ".m4a": "audio",
-    ".zip": "archive", ".tar": "archive", ".gz": "archive", ".7z": "archive",
+    "pdf": "document", "doc": "document", "docx": "document",
+    "xls": "spreadsheet", "xlsx": "spreadsheet",
+    "ppt": "presentation", "pptx": "presentation",
+    "jpg": "photo", "jpeg": "photo", "png": "photo",
+    "gif": "photo", "webp": "photo", "heic": "photo",
+    "mp4": "video", "mov": "video", "avi": "video",
+    "mp3": "audio", "wav": "audio", "m4a": "audio",
+    "zip": "archive", "tar": "archive", "gz": "archive", "7z": "archive",
 }
 
 
@@ -60,10 +60,10 @@ def guess_category(filename: str, extension: str) -> str:
 # ---------------------------------------------------------------------------
 
 _TEXT_EXTENSIONS: frozenset[str] = frozenset({
-    ".txt", ".md", ".markdown", ".csv", ".log", ".rst",
-    ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg",
-    ".py", ".js", ".ts", ".html", ".css", ".xml",
-    ".sh", ".bat", ".ps1",
+    "txt", "md", "markdown", "csv", "log", "rst",
+    "json", "yaml", "yml", "toml", "ini", "cfg",
+    "py", "js", "ts", "html", "css", "xml",
+    "sh", "bat", "ps1",
 })
 
 _PREVIEW_MAX_BYTES = 512

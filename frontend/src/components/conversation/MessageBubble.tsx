@@ -1,4 +1,5 @@
 import type { ConversationMessage } from '../../types/ui'
+import { MarkdownMessage } from './MarkdownMessage'
 import { ScanResultCard } from './ScanResultCard'
 import { RetrievalResultCard } from './RetrievalResultCard'
 
@@ -9,9 +10,13 @@ interface MessageBubbleProps {
 
 export function MessageBubble({ message, onSuggest }: MessageBubbleProps) {
   if (message.role !== 'tool') {
+    const content = message.content || (message.role === 'assistant' ? '...' : '')
     return (
       <div className={`msg msg-${message.role}`}>
-        <p>{message.content || (message.role === 'assistant' ? '...' : '')}</p>
+        {message.role === 'assistant'
+          ? <MarkdownMessage content={content} />
+          : <p>{content}</p>
+        }
       </div>
     )
   }
@@ -30,10 +35,10 @@ export function MessageBubble({ message, onSuggest }: MessageBubbleProps) {
 
   // ── Structured retrieval result card ─────────────────────────────────────
   if (toolName === 'query_indexed_files' && isResult && payload && typeof payload === 'object') {
-    // The args live in a prior tool_call message; pass them through if available via title hack
     return (
       <RetrievalResultCard
         payload={payload as Parameters<typeof RetrievalResultCard>[0]['payload']}
+        args={message.toolArgs as Parameters<typeof RetrievalResultCard>[0]['args']}
         onSuggest={onSuggest}
       />
     )
