@@ -5,9 +5,10 @@ import json
 import logging
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import Any
 
-from agent.context import assemble_context
+from agent.context import assemble_context, compact_tool_result_for_model
 from agent.providers import get_provider
 from agent.types import (
     AgentLoopResult,
@@ -35,6 +36,7 @@ TOOL_TIMEOUT_SECONDS = 60  # Maximum wall-clock time allowed for any single tool
 SYSTEM_INJECTED_PARAMS = frozenset({"session_id"})
 TOOLS_REQUIRING_SESSION_ID = frozenset({
     "scan_folder",
+    "query_indexed_files",
     "propose_plan",
     "get_task_state",
     "update_task_state",
@@ -146,6 +148,16 @@ def _serialize_tool_result(result: dict[str, Any]) -> str:
     return json.dumps(result, ensure_ascii=True, sort_keys=True)
 
 
+def _estimate_context_tokens(messages: list[dict[str, Any]]) -> int:
+    """Rough token estimate for the current message list.
+
+    Uses a simple character-count heuristic (chars / 4 ≈ tokens).
+    Good enough for logging and budget warnings; not a precise billing count.
+    """
+    total_chars = sum(len(json.dumps(m, ensure_ascii=True)) for m in messages)
+    return total_chars // 4
+
+
 def _assistant_tool_call_message(tool_calls: list[ToolCall], content: str) -> dict[str, Any]:
     return {
         "role": "assistant",
@@ -165,11 +177,18 @@ def _assistant_tool_call_message(tool_calls: list[ToolCall], content: str) -> di
 
 
 def _tool_result_message(tool_call: ToolCall, result: dict[str, Any]) -> dict[str, Any]:
+    """Build a tool-result message for the live in-memory messages list.
+
+    Uses the compact version of the result so the model's context window does not
+    grow unboundedly on each iteration.  The full raw result is persisted to
+    session_messages separately (see _persist_message call in run_agent_loop).
+    """
+    compact = compact_tool_result_for_model(tool_call.name, result)
     return {
         "role": "tool",
         "name": tool_call.name,
         "tool_call_id": tool_call.id,
-        "content": _serialize_tool_result(result),
+        "content": _serialize_tool_result(compact),
     }
 
 
@@ -180,9 +199,34 @@ async def _update_state_for_tool_start(session_id: str, tool_name: str) -> None:
         await update_task_state(session_id=session_id, current_step=SessionState.EXECUTING.value)
 
 
-async def _update_state_for_tool_result(session_id: str, tool_name: str, result: dict[str, Any]) -> str | None:
+async def _update_state_for_tool_result(
+    session_id: str,
+    tool_name: str,
+    result: dict[str, Any],
+    tool_args: dict[str, Any] | None = None,
+) -> str | None:
     if tool_name == "scan_folder":
-        await update_task_state(session_id=session_id, current_step=SessionState.PLAN_READY.value)
+        # Scans are analysis/indexing operations; they do not imply a plan exists.
+        # Transition back to IDLE and persist a compact analysis scope so subsequent
+        # turns can answer follow-up questions via query_indexed_files without
+        # rescanning — this is the persistent working-memory layer.
+        path = (tool_args or {}).get("path", "")
+        file_count = result.get("file_count") or len(result.get("files", []))
+        folder_count = result.get("folder_count") or len(result.get("folders", []))
+        scope = {
+            "path": path,
+            "scan_id": result.get("scan_id"),
+            "depth": result.get("scan_depth"),
+            "categories": result.get("categories", {}),
+            "file_count": file_count,
+            "folder_count": folder_count,
+            "scanned_at": datetime.now(timezone.utc).isoformat(),
+        }
+        await update_task_state(
+            session_id=session_id,
+            current_step=SessionState.IDLE.value,
+            active_entities_json={"scope": scope},
+        )
         return None
 
     if tool_name == "propose_plan":
@@ -303,6 +347,7 @@ async def run_agent_loop(
         extra={
             "session_id": session_id,
             "message_count": len(messages),
+            "estimated_tokens": _estimate_context_tokens(messages),
             "has_task_state": context_packet.task_state_text is not None,
             "tool_count": len(tools),
         },
@@ -494,7 +539,20 @@ async def run_agent_loop(
                     )
                     messages.append(_tool_result_message(tool_call, result))
 
-                    maybe_plan_id = await _update_state_for_tool_result(session_id, tool_call.name, result)
+                    log.info(
+                        "agent_loop.context_after_tool",
+                        extra={
+                            "session_id": session_id,
+                            "iteration": iteration,
+                            "tool": tool_call.name,
+                            "message_count": len(messages),
+                            "estimated_tokens": _estimate_context_tokens(messages),
+                        },
+                    )
+
+                    maybe_plan_id = await _update_state_for_tool_result(
+                        session_id, tool_call.name, result, tool_args=tool_call.arguments
+                    )
                     if maybe_plan_id:
                         active_plan_id = maybe_plan_id
 

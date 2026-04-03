@@ -11,14 +11,14 @@
 The agent loop is the code that runs every time the user sends a message and expects the AI to do something. It is an iterative cycle:
 
 ```
-1. Assemble context from DB + memory
-2. Call the model (Ollama) with that context + available tools
+1. Assemble context from DB + memory layers
+2. Call the configured provider with that context + available tools
 3. Model either responds with text, or requests a tool call
-4. If tool call → execute the MCP tool → append result → go back to step 2
+4. If tool call → execute the MCP tool → compact result → append to messages → go back to step 2
 5. If text response → stream it to the UI → write to DB → loop ends
 ```
 
-This is not a one-shot call. It is a loop. The model can call tools multiple times in a single user message — for example: scan folder, then propose a plan, then update task state — all before producing its final text response.
+This is not a one-shot call. It is a loop. The model can call tools multiple times in a single user message — for example: scan folder, then query indexed files, then summarize — all before producing its final text response.
 
 ---
 
@@ -27,308 +27,146 @@ This is not a one-shot call. It is a loop. The model can call tools multiple tim
 ```python
 async def run_agent_loop(session_id: str, user_message: str):
     # 1. Persist the user message
-    await db.insert_message(session_id, role=SYSTEM, content=user_message)
+    await db.insert_message(session_id, role=USER, content=user_message)
 
-    # 2. Assemble context packet
+    # 2. Assemble context packet (windowed — see Context Assembly below)
     context = await assemble_context(session_id)
+    messages = context.to_messages()  # bounded recent window, not full history
 
     # 3. Discover available MCP tools (done once at startup, cached)
-    tools = mcp_client.list_tools()  # converted to Ollama function-call format
+    tools = get_cached_tool_schemas()  # system-injected params stripped from LLM view
 
     # 4. Main loop
-    while True:
-        # Call Ollama with full context + tool schemas
-        response = await ollama.chat(
-            model=OLLAMA_MODEL,
-            messages=context.to_message_list(),
-            tools=tools,
-            stream=True
-        )
-
-        # Stream tokens to frontend via SSE
-        full_response = await stream_to_sse(response, session_id)
+    while iteration < MAX_TOOL_ITERATIONS:
+        # Call the configured provider (Ollama, Anthropic, OpenAI)
+        response = await provider.chat_stream(messages, tools, event_callback)
 
         # Did the model request a tool call?
-        if full_response.tool_calls:
-            for tool_call in full_response.tool_calls:
-                # Log the tool call
-                await log_event("tool_call", tool=tool_call.name, args=tool_call.args)
+        if response.tool_calls:
+            # Inject system params (e.g. session_id) the model never sees
+            for tool_call in response.tool_calls:
+                inject_session_params(tool_call)
+                result = await mcp.call_tool(tool_call.name, tool_call.args)
 
-                # Execute via MCP
-                result = await mcp_client.call_tool(
-                    tool_call.name,
-                    tool_call.args
-                )
+                # ── Compaction ────────────────────────────────────────────
+                # Persist FULL result to session_messages (for UI / audit).
+                # Append only a COMPACT version to the live messages list.
+                # This stops large scan payloads from inflating context.
+                await db.insert_message(session_id, role=TOOL, content=full_result)
+                messages.append(tool_result_message(tool_call, compact_result))
+                # ──────────────────────────────────────────────────────────
 
-                # Append tool result to context
-                context.append_tool_result(
-                    tool_name=tool_call.name,
-                    tool_call_id=tool_call.id,
-                    result=result
-                )
+                # After scan_folder: write analysis scope to task_state (persistent memory)
+                if tool_call.name == "scan_folder":
+                    await update_task_state(
+                        session_id,
+                        current_step="IDLE",
+                        active_entities_json={"scope": {path, scan_id, depth, categories, ...}},
+                    )
 
-                # Persist as a TOOL message
-                await db.insert_message(
-                    session_id,
-                    role=TOOL,
-                    content=result,
-                    tool_name=tool_call.name,
-                    tool_call_id=tool_call.id
-                )
-
-            # Continue the loop — model will see tool results
             continue
 
         # No tool calls — model produced a final text response
-        await db.insert_message(session_id, role=ASSISTANT, content=full_response.content)
-        break  # loop ends
+        await db.insert_message(session_id, role=ASSISTANT, content=response.content)
+        break
 ```
 
 Key points:
 - The loop continues as long as the model is requesting tool calls
-- Each tool result is appended to the running message list before the next model call
+- Each tool result is compacted before being appended to the live message list
+- Full raw results are always persisted to `session_messages` for UI / audit
+- After a scan, the loop writes a compact analysis scope to `task_state.active_entities_json`
 - Tokens stream to the frontend in real time via SSE during each model call
-- Every message (user, assistant, tool) is persisted to `session_messages`
 
 ---
 
 ## Context Assembly
 
-The context packet is what the model sees. The quality of context determines the quality of the response. A model with bad context feels stupid. A model with good context feels powerful. Context is where the intelligence lives.
+The context packet is what the model sees. It is assembled fresh at the start of every user turn from several memory layers.
 
-### Phase 1 context packet (what gets assembled before every Ollama call)
+### Memory layers (current)
 
-```python
-async def assemble_context(session_id: str) -> ContextPacket:
-    return ContextPacket(
-        # 1. System prompt — defines AIJAH's role and safety rules
-        system_prompt=load_system_prompt(),
+| Layer | Source | Role |
+|---|---|---|
+| System prompt | `context.py` | Rules, sandbox root, retrieval-first policy |
+| Policies | `operational_policies` DB table | Active safety/naming rules |
+| Preferences | `user_preferences` DB table | User preferences |
+| Task state | `task_state` DB table | Working memory: goal, current step, active plan, **analysis scope** |
+| Recent memory events | `memory_events` DB table | Last 10 executed actions (anti-repeat) |
+| Active plan | `plans` + `plan_actions` tables | Current pending plan if one exists |
+| Last scan | `scans` table | Summary of most recent scan |
+| Conversation window | `session_messages` table (last 20 rows) | Short-term continuity |
 
-        # 2. Active policies — safety rules, naming conventions
-        policies=await db.get_active_policies(user_id),
+### What is NOT in hot context (by design)
 
-        # 3. User preferences — known naming habits, folder structure preferences
-        preferences=await db.get_user_preferences(user_id),
+- Full raw tool results — stored in `session_messages` but **compacted** when loaded into the window
+- Entire transcript history — windowed to last 20 messages
+- Embeddings or semantic memory — deferred to Phase 2
 
-        # 4. Task state — what we're currently trying to do
-        task_state=await db.get_task_state(session_id),
+### Analysis scope (persistent working memory)
 
-        # 5. Session messages — full conversation so far
-        messages=await db.get_session_messages(session_id),
-    )
+After every `scan_folder` call, the loop writes a compact scope object to `task_state.active_entities_json["scope"]`:
+
+```json
+{
+  "path": "/sandbox/Downloads",
+  "scan_id": "abc123",
+  "depth": "ROOT",
+  "categories": {"document": 5, "photo": 3},
+  "file_count": 8,
+  "folder_count": 3,
+  "scanned_at": "2026-04-03T12:00:00Z"
+}
 ```
 
-### Phase 2 context packet additions (not in Phase 1)
+`context.py` formats this as an "Active analysis scope" block in the task state section. The model sees it on every subsequent turn and uses it to answer follow-up questions via `query_indexed_files` instead of rescanning.
 
-```python
-        # 6. Similar past memory events — vector-retrieved by similarity to current goal
-        similar_events=await memory.retrieve_similar(current_goal, top_k=5),
+### Tool-result compaction
 
-        # 7. Relevant file entities — files the model mentioned or scanned recently
-        relevant_files=await db.get_recently_mentioned_files(session_id),
-```
+`compact_tool_result_for_model(tool_name, result)` in `context.py` is applied in two places:
 
-### System prompt (Phase 1)
+1. In `loop.py`: before appending tool results to the live in-memory message list
+2. In `context.py._session_message_to_dict`: when loading TOOL messages from the DB into the windowed context
 
-The system prompt is the non-negotiable first message in every context. It tells the model:
-
-```
-You are AIJAH, a local file assistant. Your job is to help the user organize their files safely.
-
-Rules you must always follow:
-- Never perform file operations without a plan being proposed and approved first.
-- Always call propose_plan before suggest any rename, move, or archive action.
-- Never delete files. Use archive instead.
-- Only operate within the sandbox root path.
-- If you are unsure about a file's purpose, ask the user before including it in a plan.
-- When you propose a plan, explain your reasoning clearly so the user can make an informed decision.
-```
+The compact version strips full file/folder lists while preserving summary stats, categories, and a bounded sample. Full raw results remain in the DB.
 
 ---
 
-## The MCP Tool Call Cycle
+## Tool Registry
 
-MCP is a JSON-RPC 2.0 protocol. The agent loop connects to the MCP server at startup and holds a persistent session.
+Current tools registered in `mcp_server.py`:
 
-```
-Startup (once):
-  Agent loop → MCP server: initialize { protocolVersion, capabilities }
-  MCP server → Agent loop: initialize result { capabilities }
-  Agent loop → MCP server: initialized (notification)
-  Agent loop → MCP server: tools/list
-  MCP server → Agent loop: list of tool schemas
-  Agent loop: convert schemas to Ollama function-call format, cache
+| Tool | Role | Session-injected |
+|---|---|---|
+| `scan_folder` | Index path into file/folder entities | `session_id` |
+| `query_indexed_files` | Retrieve from indexed entities | `session_id` |
+| `read_file_metadata` | Inspect one file | — |
+| `propose_plan` | Create approval-backed plan | `session_id` |
+| `execute_action` | Execute one APPROVED action | — |
+| `get_task_state` | Read working state | `session_id` |
+| `update_task_state` | Write working state | `session_id` |
 
-Per tool call (many times per loop iteration):
-  Model output: { tool_name: "scan_folder", args: { path: "/sandbox/invoices" } }
-  Agent loop → MCP server: tools/call { name: "scan_folder", arguments: { path: ... } }
-  MCP server: runs the function, writes to DB
-  MCP server → Agent loop: { content: [{ type: "text", text: "{ files: [...] }" }] }
-  Agent loop: appends result to context, continues loop
-```
-
-The model never talks to the MCP server directly. The agent loop is the bridge:
-- Model → agent loop: tool call request (just JSON in the response)
-- Agent loop → MCP server: actual RPC call
-- MCP server → agent loop: result
-- Agent loop → model: result appended to message history
+See `docs/TOOL_DISPATCH.md` for full parameter classification.
 
 ---
 
-## Observability: What You Must Log
+## Observability
 
-Agent systems fail silently. A model makes a wrong decision and you have no idea why — because you can't see what context it was given. Observability is not optional.
+The loop logs context snapshots at key points. Look for these log events:
 
-For every agent loop run, log:
+- `agent_loop.context` — at the start of each turn: `message_count`, `estimated_tokens`, `tool_count`
+- `agent_loop.model_response` — after each provider call: `had_tool_calls`, `tool_names`, `response_length`
+- `agent_loop.tool_call` — before each tool dispatch: `tool`, `tool_args`
+- `agent_loop.tool_result` — after each tool result: `tool`, `result_preview`
+- `agent_loop.context_after_tool` — after each tool result is appended: `message_count`, `estimated_tokens`
 
-### 1. Context snapshot (before each Ollama call)
-```python
-log.info("agent_loop.context", extra={
-    "session_id": session_id,
-    "message_count": len(context.messages),
-    "has_task_state": context.task_state is not None,
-    "active_plan_id": context.task_state.active_plan_id,
-    "current_step": context.task_state.current_step,
-    "token_estimate": estimate_tokens(context),
-})
-```
-
-### 2. Model response (after each Ollama call)
-```python
-log.info("agent_loop.model_response", extra={
-    "session_id": session_id,
-    "had_tool_calls": bool(response.tool_calls),
-    "tool_names": [tc.name for tc in response.tool_calls],
-    "response_length": len(response.content),
-})
-```
-
-### 3. Tool call + result
-```python
-log.info("agent_loop.tool_call", extra={
-    "session_id": session_id,
-    "tool": tool_call.name,
-    "args": tool_call.args,
-})
-log.info("agent_loop.tool_result", extra={
-    "session_id": session_id,
-    "tool": tool_call.name,
-    "result_preview": str(result)[:200],
-    "success": "error" not in result,
-})
-```
-
-### 4. State transitions
-```python
-log.info("agent_loop.state_transition", extra={
-    "session_id": session_id,
-    "from_step": old_step,
-    "to_step": new_step,
-    "trigger": "tool_result" or "user_input",
-})
-```
-
-### Why this matters
-
-When something goes wrong (model proposes a bad rename, plan doesn't appear, execution fails), you open the logs and see:
-
-- What context the model received
-- What tool it called and with what arguments
-- What the tool returned
-- What the model decided next
-
-Without these logs, debugging an agent loop is guesswork.
+The `estimated_tokens` field uses a character-count heuristic (chars / 4). Use it to watch for context growth between iterations and across turns.
 
 ---
 
-## The Five Things That Control Agent Quality
+## Provider Support
 
-In order of impact:
+The loop is provider-agnostic. All providers implement `chat_stream(messages, tools, event_callback) → ChatTurnResult`. The loop assembles context in OpenAI/Ollama message format; each provider adapter converts to its own wire format and normalizes tool calls back.
 
-### 1. Context quality (most important)
-The model is only as good as what you put in the context. Bad context = dumb behavior. Good context (task state, policies, recent messages, preferences) = smart behavior. This matters more than which model you use.
+See `docs/PROVIDER_ARCHITECTURE.md` for the full provider boundary definition.
 
-### 2. Tool contracts (second most important)
-If tool schemas are vague, the model will call them with wrong arguments. If tool names are ambiguous, the model will call the wrong tool. Tool names and descriptions must be clear and unambiguous. This is the `propose_plan` tool's description:
-```
-"Generate a file reorganization plan and write it to the database. 
-Call this tool when you have scanned a folder and are ready to suggest 
-how to rename and move files. Do NOT call execute_action before this."
-```
-
-### 3. System prompt precision
-Vague system prompts produce vague behavior. The system prompt must state the rules clearly and absolutely. Include what the model must always do, what it must never do, and what it should ask the user when unsure.
-
-### 4. Model selection
-For Phase 1, `qwen2.5` is the best local option for tool-calling. Accept that it will feel less capable than Claude or GPT-4 in Phase 1. That is expected. The architecture is right; the model will improve as you upgrade Ollama or switch models.
-
-### 5. Loop termination
-The loop must have a maximum iteration count. If the model keeps calling tools without producing a final response, the loop must stop. A reasonable limit is 10 tool calls per user message. Beyond that, log the error and return a fallback response.
-
-```python
-MAX_TOOL_ITERATIONS = 10
-iteration = 0
-
-while True:
-    iteration += 1
-    if iteration > MAX_TOOL_ITERATIONS:
-        log.error("agent_loop.max_iterations_exceeded", session_id=session_id)
-        await db.insert_message(session_id, role=ASSISTANT,
-            content="I ran into an issue completing that task. Please try again.")
-        break
-    ...
-```
-
----
-
-## How the Agent Loop Connects to the Rest of the System
-
-```
-User sends message
-        │
-        ▼
-  POST /sessions/{id}/messages
-        │
-        ▼
-  agent.run_agent_loop()
-        │
-        ├── assembles context from DB
-        │       └── reads: sessions, session_messages, task_state,
-        │                  user_preferences, operational_policies
-        │
-        ├── calls Ollama (streams tokens → SSE → browser)
-        │
-        ├── if tool call:
-        │       └── mcp_client.call_tool()
-        │               └── mcp_server.py runs the Python function
-        │                       ├── scan_folder: reads filesystem, writes file_entities
-        │                       ├── propose_plan: writes plans + plan_actions
-        │                       ├── execute_action: reads file_entities, moves files,
-        │                       │                   writes memory_events
-        │                       ├── get/update_task_state: reads/writes task_state
-        │                       └── read_file_metadata: reads file_entities
-        │
-        └── final response: writes to session_messages, SSE message_complete event
-```
-
----
-
-## Phase 2 Loop Enhancements (do not implement in Phase 1)
-
-In Phase 2, the context assembler gains vector retrieval:
-
-```python
-# Phase 2 addition — not in Phase 1
-similar_events = await vector_db.search(
-    embedding=embed(current_goal),
-    table="memory_event_embeddings",
-    top_k=5
-)
-```
-
-And new MCP tools are added:
-- `read_document` — extract text from PDF, Word, image
-- `search_memory` — semantic search across past memory events
-- `classify_file` — link a file to a known entity
-
-The loop structure itself does not change. Only the context gets richer and the tool list grows.

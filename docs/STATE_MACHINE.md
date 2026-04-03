@@ -39,7 +39,7 @@ This is the view from the user's seat: "what is AIJAH currently doing in this co
 |---|---|---|
 | `IDLE` | No active task. Waiting for user input. | Chat input ready, no progress indicator |
 | `SCANNING` | `scan_folder` tool is running, indexing files. | "Scanning files..." spinner |
-| `PLAN_READY` | A plan has been generated and written to DB. | Plan card with action list visible |
+| `PLAN_READY` | Legacy/optional intermediate state; not required in the retrieval-first flow. | Optional transitional state only |
 | `AWAITING_APPROVAL` | Plan is shown; waiting for user to approve/reject actions. | Approve / Reject buttons active per action |
 | `EXECUTING` | Approved actions are being executed by the executor. | "Executing..." per-action progress |
 | `COMPLETE` | All approved actions finished successfully. | Success summary, memory logged |
@@ -56,9 +56,9 @@ SCANNING ───────────────────────�
   │                                                (scan fails / path not found)
   │  scan_folder tool returns results
   ▼
-PLAN_READY
+IDLE
   │
-  │  propose_plan tool writes plan to DB
+  │  user asks for changes and propose_plan writes plan to DB
   ▼
 AWAITING_APPROVAL ─────────────────────────────────────► IDLE
   │                                          (user rejects entire plan)
@@ -81,9 +81,9 @@ IDLE
 |---|---|---|---|
 | `IDLE` | User sends file task message | None | `SCANNING` |
 | `IDLE` | User sends chat-only message | None | `IDLE` (agent replies, stays IDLE) |
-| `SCANNING` | `scan_folder` tool completes | Files found | `PLAN_READY` |
+| `SCANNING` | `scan_folder` tool completes | Analysis/indexing complete | `IDLE` |
 | `SCANNING` | `scan_folder` tool fails | Path invalid or permission error | `ERROR` |
-| `PLAN_READY` | `propose_plan` tool writes plan | Plan has ≥1 action | `AWAITING_APPROVAL` |
+| `IDLE` | `propose_plan` tool writes plan | User explicitly requested changes; plan has ≥1 action | `AWAITING_APPROVAL` |
 | `AWAITING_APPROVAL` | User approves ≥1 action, clicks Execute | At least 1 action is APPROVED | `EXECUTING` |
 | `AWAITING_APPROVAL` | User rejects all actions | All actions REJECTED | `IDLE` |
 | `EXECUTING` | All actions complete with SUCCESS | outcome = SUCCESS for all | `COMPLETE` |

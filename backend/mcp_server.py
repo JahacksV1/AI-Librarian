@@ -8,6 +8,7 @@ from starlette.responses import JSONResponse
 from tools.execute_action import execute_action
 from tools.get_task_state import get_task_state
 from tools.propose_plan import propose_plan
+from tools.query_indexed_files import query_indexed_files
 from tools.read_file_metadata import read_file_metadata
 from tools.scan_folder import scan_folder
 from tools.update_task_state import update_task_state
@@ -53,6 +54,44 @@ async def scan_folder_tool(
 
 
 @mcp.tool(
+    name="query_indexed_files",
+    description=(
+        "Query indexed filesystem entities from the database without scanning the filesystem. "
+        "Use this for analysis questions like largest files, files by extension/category, "
+        "folder listings under a path, and compact aggregate counts."
+    ),
+)
+async def query_indexed_files_tool(
+    session_id: str = "",
+    path_prefix: str | None = None,
+    entity_type: str = "file",
+    extension: str | None = None,
+    category: str | None = None,
+    min_size_bytes: int | None = None,
+    max_size_bytes: int | None = None,
+    exists_now: bool | None = True,
+    sort_by: str = "name",
+    sort_order: str = "asc",
+    limit: int = 25,
+    include_counts: bool = False,
+) -> dict[str, Any]:
+    return await query_indexed_files(
+        session_id=session_id,
+        path_prefix=path_prefix,
+        entity_type=entity_type,
+        extension=extension,
+        category=category,
+        min_size_bytes=min_size_bytes,
+        max_size_bytes=max_size_bytes,
+        exists_now=exists_now,
+        sort_by=sort_by,
+        sort_order=sort_order,
+        limit=limit,
+        include_counts=include_counts,
+    )
+
+
+@mcp.tool(
     name="read_file_metadata",
     description="Read metadata for a single file inside SANDBOX_ROOT without reading file contents.",
 )
@@ -63,7 +102,8 @@ async def read_file_metadata_tool(path: str) -> dict[str, Any]:
 @mcp.tool(
     name="propose_plan",
     description=(
-        "Create a file reorganization plan. Call this AFTER scan_folder. "
+        "Create a file reorganization plan when the user wants real changes (move/rename/archive/create folders/dedupe). "
+        "Usually call scan_folder first so targets are indexed, but you do NOT need to propose a plan for analysis-only Q&A. "
         "Each action in the actions list must be a dict with these keys: "
         "action_type (one of: RENAME, MOVE, CREATE_FOLDER, ARCHIVE, CLASSIFY), "
         "target_type ('file' or 'folder'), "

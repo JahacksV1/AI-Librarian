@@ -32,9 +32,26 @@ All file paths you use in tool calls must be absolute paths starting with {setti
 
 Rules you must always follow:
 - Never perform file operations without a plan being proposed and approved first.
-- After scanning a folder, ALWAYS call propose_plan to create a formal, executable plan —
-  even if only a few files are visible. Do NOT give text-only suggestions. The user needs a
-  reviewable plan they can approve or reject. "Suggest" and "organize" always mean: create a plan.
+- Only call propose_plan when the user is asking for (or agrees to) real changes such as organizing,
+  moving, renaming, archiving, creating folders, or deduping. If the user's intent is unclear,
+  ask clarifying questions first and do analysis-only responses.
+- For analysis questions (what exists, biggest files, categories, likely duplicates), prefer
+  query_indexed_files over propose_plan. Use specific filters and sorting so your answer is
+  grounded in indexed facts.
+- Retrieval-first decision policy:
+  1) If the task state shows "Active analysis scope", the data for that path is already indexed
+     in the database. Use query_indexed_files with path_prefix set to that path before considering
+     a rescan. Use the scan_id from the scope as confirmation that the data is available.
+  2) If indexed data is missing or clearly stale for the requested path, call scan_folder
+     (ROOT first) then query_indexed_files.
+  3) Only call propose_plan after the user clearly asks for changes.
+- Always include concrete evidence from retrieval in your answer (counts, filenames, sizes,
+  categories, or paths). Avoid vague summaries.
+- For likely duplicates, use retrieval heuristics (name/size/path similarity) and label results as
+  "potential duplicates" unless content hash evidence exists.
+- After scanning a folder, do NOT automatically propose a plan. First, summarize what you found
+  and ask what the user wants to do next (e.g., focus on a subfolder, identify duplicates, or
+  propose an organization plan). Propose a plan only once the user confirms they want changes.
 - Never delete files. Use archive instead.
 - Only operate within the sandbox root path ({settings.sandbox_root}).
 - If you are unsure about a file's purpose, ask the user before including it in a plan.
@@ -43,8 +60,14 @@ Rules you must always follow:
 Rules about scan depth — read carefully:
 - When first exploring an unfamiliar path, ALWAYS start with scan_depth=ROOT (immediate children only).
   ROOT is instant and gives you the folder structure to orient yourself.
-- After a ROOT scan, call propose_plan on what you found at that level, then offer to go deeper
-  into specific subfolders if the user wants more detail.
+- If a path has already been scanned in this session (check "Active analysis scope" in task state,
+  or "Last scan" context), prefer query_indexed_files first instead of rescanning.
+- Query patterns to prefer:
+  - "biggest PDFs" -> query_indexed_files(entity_type="file", extension="pdf", sort_by="size", sort_order="desc")
+  - "category breakdown" -> query_indexed_files(..., include_counts=true)
+  - "largest folders / folder list" -> query_indexed_files(entity_type="folder", path_prefix=...)
+- After a ROOT scan, summarize what you found at that level and ask which subfolder to focus on next.
+  Only propose a plan if the user wants to take action.
 - Only go DEEP or CONTENT on a specific subfolder when the user explicitly asks.
 - Never call scan_folder with scan_depth=DEEP or CONTENT on {settings.sandbox_root} itself — it contains
   hundreds of thousands of files and will time out. Always ROOT first.
@@ -59,6 +82,72 @@ Rules about avoiding redundant or incorrect plans:
 - Do not create CREATE_FOLDER actions for folders that already appear in the scan results.
 - If scan_folder returns no files that need organizing, tell the user rather than generating an empty or
   trivially wrong plan."""
+
+CONVERSATION_WINDOW_MESSAGES = 20
+
+# ---------------------------------------------------------------------------
+# Tool-result compaction
+# ---------------------------------------------------------------------------
+# Raw tool output is always persisted to session_messages for the UI, audit,
+# and debugging.  What the model sees in its message window is a compact,
+# high-signal summary.  Re-fetchable details (full file/folder lists) are
+# stripped; the model can call query_indexed_files to drill into specifics.
+
+_MODEL_REPLAY_MAX_FILES = 20    # max file entries in a compacted scan result
+_MODEL_REPLAY_MAX_FOLDERS = 25  # max folder entries in a compacted scan result
+
+
+def compact_tool_result_for_model(tool_name: str, result: dict[str, Any]) -> dict[str, Any]:
+    """Return a token-safe version of a tool result for the model's context window.
+
+    The compacted version is used:
+    - in the live agent loop (appended to the in-memory messages list)
+    - when loading TOOL messages from the DB for context assembly
+
+    This prevents large scan or retrieval payloads from consuming the context
+    budget on every subsequent iteration or follow-up turn.
+    """
+    if result.get("error"):
+        return result
+
+    if tool_name == "scan_folder":
+        # Build compact dict excluding the large raw lists
+        compact: dict[str, Any] = {
+            k: v for k, v in result.items()
+            if k not in ("files", "file_sample", "folders")
+        }
+
+        # Bounded file sample (ROOT returns "files"; DEEP/CONTENT return "file_sample")
+        files = result.get("files") or result.get("file_sample") or []
+        if files:
+            compact["file_sample"] = files[:_MODEL_REPLAY_MAX_FILES]
+            if len(files) > _MODEL_REPLAY_MAX_FILES:
+                compact["file_sample_note"] = (
+                    f"Showing {_MODEL_REPLAY_MAX_FILES} of {len(files)} files. "
+                    "Use query_indexed_files for more."
+                )
+
+        # Bounded folder summaries (name + size indicator only)
+        folders = result.get("folders") or []
+        if folders:
+            compact["folder_summaries"] = [
+                {
+                    "canonical_path": f.get("canonical_path", ""),
+                    "folder_name": f.get("folder_name", ""),
+                    "child_count": f.get("child_count", f.get("file_count", 0)),
+                }
+                for f in folders[:_MODEL_REPLAY_MAX_FOLDERS]
+            ]
+            if len(folders) > _MODEL_REPLAY_MAX_FOLDERS:
+                compact["folders_note"] = (
+                    f"Showing {_MODEL_REPLAY_MAX_FOLDERS} of {len(folders)} folders. "
+                    "Use query_indexed_files(entity_type='folder') for more."
+                )
+
+        return compact
+
+    # All other tools (query_indexed_files is already result-bounded) pass through.
+    return result
 
 
 def _json_default(value: Any) -> Any:
@@ -106,19 +195,54 @@ def _format_task_state(task_state: TaskState | None) -> str | None:
     if task_state is None:
         return None
 
+    # Exclude active_entities_json from the raw JSON block — the scope it contains
+    # is formatted as a dedicated "Active analysis scope" section below for clarity.
     payload = {
         "goal": task_state.goal,
         "current_step": task_state.current_step,
         "active_plan_id": str(task_state.active_plan_id) if task_state.active_plan_id else None,
-        "active_entities_json": task_state.active_entities_json,
         "pending_action_ids_json": task_state.pending_action_ids_json,
         "scratchpad_summary": task_state.scratchpad_summary,
         "updated_at": task_state.updated_at.isoformat() if task_state.updated_at else None,
     }
-    return (
-        "Current task state:\n"
-        f"{json.dumps(payload, default=_json_default, ensure_ascii=True, sort_keys=True, indent=2)}"
+    lines = [
+        "Current task state:",
+        json.dumps(payload, default=_json_default, ensure_ascii=True, sort_keys=True, indent=2),
+    ]
+
+    # Analysis scope — written by the agent loop after each scan_folder call.
+    # This is persistent working memory: it tells the model which path is already
+    # indexed in the DB so follow-up questions can use query_indexed_files instead
+    # of rescanning.
+    scope_data = (
+        task_state.active_entities_json.get("scope")
+        if isinstance(task_state.active_entities_json, dict)
+        else None
     )
+    if scope_data and isinstance(scope_data, dict):
+        lines.append("")
+        lines.append(
+            "Active analysis scope (path already indexed — "
+            "use query_indexed_files before rescanning):"
+        )
+        if scope_data.get("path"):
+            lines.append(f"  path: {scope_data['path']}")
+        if scope_data.get("depth"):
+            lines.append(f"  scan_depth: {scope_data['depth']}")
+        if scope_data.get("scan_id"):
+            lines.append(f"  scan_id: {scope_data['scan_id']}")
+        if scope_data.get("scanned_at"):
+            lines.append(f"  scanned_at: {scope_data['scanned_at']}")
+        fc = scope_data.get("file_count")
+        fol = scope_data.get("folder_count")
+        if fc is not None:
+            lines.append(f"  indexed: {fc} files, {fol or 0} folders")
+        cats = scope_data.get("categories")
+        if cats and isinstance(cats, dict):
+            cat_str = ", ".join(f"{k}({v})" for k, v in list(cats.items())[:8])
+            lines.append(f"  categories: {cat_str}")
+
+    return "\n".join(lines)
 
 
 def _format_recent_memory_events(events: list[MemoryEvent]) -> str | None:
@@ -203,9 +327,23 @@ def _format_last_scan(scan: Scan | None, current_session_id: str | None = None) 
 
 
 def _session_message_to_dict(message: SessionMessage) -> dict[str, Any]:
+    # For TOOL messages, compact the persisted payload before putting it in the
+    # model's context window.  The full raw content stays in the DB for the UI,
+    # audit, and debugging; only the model sees the compacted version.
+    content = message.content
+    if message.role.value == "TOOL" and message.tool_name:
+        try:
+            parsed = json.loads(content)
+            if isinstance(parsed, dict):
+                compact = compact_tool_result_for_model(message.tool_name, parsed)
+                if compact is not parsed:
+                    content = json.dumps(compact, ensure_ascii=True, sort_keys=True)
+        except (json.JSONDecodeError, ValueError):
+            pass  # If it can't be parsed, leave content as-is
+
     payload: dict[str, Any] = {
         "role": message.role.value.lower(),
-        "content": message.content,
+        "content": content,
     }
 
     if message.tool_name:
@@ -236,6 +374,37 @@ def _session_message_to_dict(message: SessionMessage) -> dict[str, Any]:
             payload["metadata"] = message.metadata_json
 
     return payload
+
+
+def _is_assistant_tool_call_message(message: SessionMessage) -> bool:
+    if message.role.value != "ASSISTANT":
+        return False
+    if not message.metadata_json or not isinstance(message.metadata_json, dict):
+        return False
+    return bool(message.metadata_json.get("tool_calls"))
+
+
+def _window_conversation_rows(rows: list[SessionMessage], window_size: int) -> list[SessionMessage]:
+    """Return a recent conversation window while preserving tool-call continuity.
+
+    We keep a bounded tail for normal chat continuity, but if the window starts
+    inside tool-result rows we expand backward so provider adapters still see a
+    coherent assistant tool-call message followed by tool results.
+    """
+    if window_size <= 0 or len(rows) <= window_size:
+        return rows
+
+    start = len(rows) - window_size
+
+    # Never start in the middle of consecutive tool rows.
+    while start > 0 and rows[start].role.value == "TOOL":
+        start -= 1
+
+    # If this slice begins right after an assistant tool-call envelope, include it.
+    if start > 0 and _is_assistant_tool_call_message(rows[start - 1]):
+        start -= 1
+
+    return rows[start:]
 
 
 @dataclass(slots=True)
@@ -325,6 +494,10 @@ async def assemble_context(session_id: str) -> ContextPacket:
                 .where(SessionMessage.session_id == session_uuid)
                 .order_by(SessionMessage.created_at.asc(), SessionMessage.id.asc())
             )
+        )
+        conversation_rows = _window_conversation_rows(
+            conversation_rows,
+            window_size=CONVERSATION_WINDOW_MESSAGES,
         )
 
         # Recent memory events — last 10 for this session, most recent first

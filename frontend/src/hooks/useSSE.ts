@@ -61,6 +61,8 @@ export function useSSE({
               title: `Calling ${event.tool}`,
               content: JSON.stringify(event.args, null, 2),
               payload: event.args,
+              toolName: event.tool,
+              isResult: false,
             },
           ])
           break
@@ -73,6 +75,8 @@ export function useSSE({
               title: `Result ${event.tool}`,
               content: JSON.stringify(event.result, null, 2),
               payload: event.result,
+              toolName: event.tool,
+              isResult: true,
             },
           ])
           break

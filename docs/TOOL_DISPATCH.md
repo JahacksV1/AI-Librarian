@@ -52,17 +52,66 @@ Scan a directory inside SANDBOX_ROOT and write file/folder metadata into the dat
 | Parameter | Type | Tag | Source |
 |-----------|------|-----|--------|
 | `path` | `str` | **LLM** | Model decides which directory to scan based on user request |
-| `recursive` | `bool` | **LLM** | Model decides scan depth (default `true`) |
+| `scan_depth` | `str` | **LLM** | Model selects ROOT, DEEP, or CONTENT based on task scope |
+| `recursive` | `bool` | **LLM** | Model decides recursive vs non-recursive walk |
 | `session_id` | `str` | **SYS** | Agent loop injects from `run_agent_loop(session_id=...)` |
 
 **What the LLM sees:**
 ```json
-{ "path": "/sandbox", "recursive": true }
+{ "path": "/sandbox", "scan_depth": "ROOT", "recursive": true }
 ```
 
 **What MCP receives (after injection):**
 ```json
-{ "path": "/sandbox", "recursive": true, "session_id": "a7e099a8-..." }
+{ "path": "/sandbox", "scan_depth": "ROOT", "recursive": true, "session_id": "a7e099a8-..." }
+```
+
+---
+
+### query_indexed_files
+
+Query indexed file/folder entities for analysis without rescanning the filesystem.
+
+| Parameter | Type | Tag | Source |
+|-----------|------|-----|--------|
+| `path_prefix` | `str?` | **LLM** | Model narrows query to a subtree |
+| `entity_type` | `str` | **LLM** | Model chooses `file` or `folder` |
+| `extension` | `str?` | **LLM** | Model filters by extension (e.g. `pdf`) |
+| `category` | `str?` | **LLM** | Model filters by guessed category |
+| `min_size_bytes` | `int?` | **LLM** | Model sets lower size bound |
+| `max_size_bytes` | `int?` | **LLM** | Model sets upper size bound |
+| `exists_now` | `bool?` | **LLM** | Model controls current vs historical entities |
+| `sort_by` | `str` | **LLM** | Model chooses sort field |
+| `sort_order` | `str` | **LLM** | Model chooses `asc` or `desc` |
+| `limit` | `int` | **LLM** | Model caps number of returned rows |
+| `include_counts` | `bool` | **LLM** | Model requests aggregate counts |
+| `session_id` | `str` | **SYS** | Agent loop injects from `run_agent_loop(session_id=...)` |
+
+**What the LLM sees:**
+```json
+{
+  "entity_type": "file",
+  "path_prefix": "/sandbox/Downloads",
+  "extension": "pdf",
+  "sort_by": "size",
+  "sort_order": "desc",
+  "limit": 10,
+  "include_counts": true
+}
+```
+
+**What MCP receives (after injection):**
+```json
+{
+  "session_id": "a7e099a8-...",
+  "entity_type": "file",
+  "path_prefix": "/sandbox/Downloads",
+  "extension": "pdf",
+  "sort_by": "size",
+  "sort_order": "desc",
+  "limit": 10,
+  "include_counts": true
+}
 ```
 
 ---
@@ -158,7 +207,8 @@ Execute a single APPROVED plan action.
 
 | Tool | LLM-facing params | System-injected params |
 |------|-------------------|------------------------|
-| `scan_folder` | `path`, `recursive` | `session_id` |
+| `scan_folder` | `path`, `scan_depth`, `recursive` | `session_id` |
+| `query_indexed_files` | `path_prefix`, `entity_type`, `extension`, `category`, `min_size_bytes`, `max_size_bytes`, `exists_now`, `sort_by`, `sort_order`, `limit`, `include_counts` | `session_id` |
 | `propose_plan` | `goal`, `rationale_summary`, `actions` | `session_id` |
 | `get_task_state` | *(none)* | `session_id` |
 | `update_task_state` | `goal`, `current_step`, `active_plan_id`, `scratchpad_summary` | `session_id` |
@@ -175,6 +225,7 @@ The dispatch logic lives in `backend/agent/loop.py`:
 # Tools that need session_id injected by the agent loop.
 TOOLS_REQUIRING_SESSION_ID = {
     "scan_folder",
+    "query_indexed_files",
     "propose_plan",
     "get_task_state",
     "update_task_state",

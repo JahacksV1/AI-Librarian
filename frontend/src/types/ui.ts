@@ -4,6 +4,8 @@ export interface ConversationMessage {
   content: string
   title?: string
   payload?: unknown
+  toolName?: string
+  isResult?: boolean
 }
 
 export interface ActivityEntry {

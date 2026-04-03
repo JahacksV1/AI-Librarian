@@ -19,7 +19,6 @@ from db.connection import db_manager
 from db.enums import ActionStatus, PlanStatus, SessionMode, SessionState, SessionStatus
 from db.models import Device, FileEntity, FolderEntity, Plan, PlanAction, Scan, Session, SessionMessage, TaskState
 from db.utils import recompute_plan_status
-from tools.scan_folder import scan_folder
 
 router = APIRouter()
 
@@ -42,12 +41,6 @@ class SendMessageRequest(BaseModel):
 
 class UpdateActionRequest(BaseModel):
     status: ActionStatus
-
-
-class ScanRequest(BaseModel):
-    path: str
-    session_id: str
-    recursive: bool = True
 
 
 def _session_payload(session_row: Session) -> dict[str, Any]:
@@ -583,21 +576,6 @@ async def list_folders(
             }
             for f in folder_rows
         ]
-    }
-
-
-@router.post("/scan")
-async def scan_filesystem(body: ScanRequest) -> dict[str, Any]:
-    result = await scan_folder(
-        path=body.path,
-        recursive=body.recursive,
-        session_id=body.session_id,
-    )
-    return {
-        "files_found": len(result.get("files", [])),
-        "folders_found": len(result.get("folders", [])),
-        "session_id": body.session_id,
-        "scan_completed_at": datetime.now(timezone.utc).isoformat(),
     }
 
 

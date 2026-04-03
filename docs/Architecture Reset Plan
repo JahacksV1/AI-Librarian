@@ -1,0 +1,380 @@
+Architecture Reset Plan
+Goal
+This plan reframes AIJAH as a set of connected parts that must cooperate well:
+the frontend must expose the right actions and history,
+the backend loop must give the model the right amount of context,
+the tools must do narrow jobs well,
+the database must hold durable knowledge,
+and the safety layer must stay authoritative when real file actions happen.
+The point is not to chase a prettier architecture document. The point is to understand which pieces are already solid, which ones are overloaded, and which missing connections are making the agent feel inefficient.
+Current Puzzle Map
+flowchart LR
+user[User] --> frontend[FrontendUI]
+frontend --> api[FastAPI]
+api --> loop[AgentLoop]
+loop --> context[ContextAssembler]
+context --> db[Postgres]
+loop --> mcp[MCPServer]
+mcp --> scan[ScanAndIndexTools]
+mcp --> plan[PlanningTools]
+mcp --> exec[ExecutionTools]
+scan --> db
+plan --> db
+exec --> db
+exec --> fs[FilesystemSandbox]
+db --> frontend
+What Is Already Good
+The basic end-to-end path exists and is understandable: user message, agent loop, tool call, persistence, SSE, plan, approval, execution.
+The database layer is already acting like the backbone of the app rather than an afterthought. [C:/Users/jaham/aijah/docs/DB_ARCHITECTURE.md](C:/Users/jaham/aijah/docs/DB_ARCHITECTURE.md) and the current backend structure are strong here.
+The safety boundary is real, not just prompt text. Execution checks approvals and sandbox constraints before touching files.
+Scan persistence is better than it used to be. [C:/Users/jaham/aijah/docs/PHASE_1.7_HANDOFF.md](C:/Users/jaham/aijah/docs/PHASE_1.7_HANDOFF.md) shows that scans, categories, previews, and scan SSE now exist as first-class product pieces.
+memory_events already provide useful anti-repeat guardrails in the current flow. [C:/Users/jaham/aijah/backend/tools/propose_plan.py](C:/Users/jaham/aijah/backend/tools/propose_plan.py) uses them to stop the model from planning the same move twice in one session.
+Where The Connections Are Weak
+1. Scan And Understanding Are Mixed Together
+scan_folder currently does all of these at once in [C:/Users/jaham/aijah/backend/tools/scan_folder.py](C:/Users/jaham/aijah/backend/tools/scan_folder.py):
+walks the filesystem,
+writes scan rows,
+upserts file and folder entities,
+computes categories and previews,
+detects changes,
+and returns a model-facing payload.
+That means one tool is serving two masters:
+the system needs it as an indexer,
+the model needs it as a compact understanding primitive.
+Those are related, but they should not be the same responsibility.
+2. The Loop Still Relies On Transcript Weight
+The agent loop and context layer still build intelligence largely by replaying:
+full session_messages,
+recent tool results,
+current task state as JSON text,
+active plan text,
+recent memory event summaries,
+last scan summary.
+That works, but it means the loop is paying for context repeatedly instead of asking the database focused questions.
+3. Memory Exists In Multiple Forms, But Only Some Of It Is Really Queried
+Today AIJAH has four practical memory-like stores:
+session_messages: full conversation and tool transcript
+task_state: small working memory for the active session
+scans plus file_entities and folder_entities: durable filesystem knowledge
+memory_events: audit trail of actions and outcomes
+The weak connection is that only a small portion of this is really used as retrieval:
+task_state is used directly
+last_scan is used directly
+recent memory_events are formatted into context and checked in propose_plan
+full session_messages are replayed heavily
+What is mostly missing is a narrow retrieval layer over indexed file data. Right now the model is better at writing to memory than asking memory precise questions.
+What Memory Is For Right Now
+Working Memory
+task_state is the live scratchpad for the session:
+current goal,
+current step,
+active plan id,
+scratchpad summary.
+This is useful and worth keeping. It is small and directly operational.
+Conversation Memory
+session_messages are currently serving two purposes:
+user-visible conversation history,
+model replay context.
+That second purpose is what becomes expensive. The transcript is useful, but it should not be the main long-term intelligence layer.
+Why it exists at all:
+it is the simplest canonical record of what happened in the session,
+it lets the UI reconstruct the conversation,
+it lets the backend replay tool-call and tool-result sequences in provider-compatible format,
+and it preserves short-term conversational continuity without requiring a separate summarization system first.
+Why it becomes the wrong default:
+it stores everything, including bulky tool output,
+it duplicates knowledge that already exists in better structured tables,
+and it makes the model re-read history instead of ask focused questions.
+Filesystem Memory
+scans, file_entities, and folder_entities are the most promising memory system you already have.
+They can become the source of truth for questions like:
+what folders exist here,
+what file types dominate this area,
+what changed since last scan,
+what files look like duplicates,
+what paths already appear organized.
+This is the part that should eventually carry more of the model’s understanding burden.
+Action Memory
+memory_events currently work more like an audit and safety memory than a reasoning memory:
+what action ran,
+what changed before and after,
+whether it succeeded,
+which paths should not be proposed again right away.
+That is already useful, but it is not yet a true “memory query system.” It is mostly a write-heavy log with a few guardrail reads.
+Memory Map
+This is the plain-language map of the memory layers that exist today.
+1. session_messages
+What it is:
+the full session transcript
+user messages, assistant replies, tool calls, and tool results
+What writes it:
+run_agent_loop() persists new user messages, assistant messages, and tool results in [C:/Users/jaham/aijah/backend/agent/loop.py](C:/Users/jaham/aijah/backend/agent/loop.py)
+What reads it today:
+the UI when restoring or displaying conversation history
+assemble_context() when rebuilding conversation context for the next model call
+provider adapters when reconstructing tool-call sequences, especially Anthropic-compatible replay
+Why it exists:
+it is the canonical transcript of what happened in a session
+it supports user-visible continuity
+it preserves exact tool-use history
+What is good about it:
+simple
+complete
+useful for debugging and replay
+What is weak about it:
+it is too expensive to treat the whole transcript as model context every turn
+it stores bulky tool outputs that duplicate structured DB knowledge
+it blurs user history and model reasoning context into one thing
+What it should become:
+the canonical transcript and audit trail
+a short-window source for conversational continuity
+not the primary long-term memory layer for reasoning about files
+2. task_state
+What it is:
+per-session working memory
+the current scratchpad for what the assistant is doing right now
+What writes it:
+the agent loop for state transitions
+update_task_state
+propose_plan
+execution paths that update current step and active plan
+What reads it today:
+assemble_context()
+tool and execution code
+any flow that needs the current session goal, step, or active plan
+Why it exists:
+the agent needs a compact place for live working context that is smaller than the transcript
+What is good about it:
+small
+operational
+directly useful for continuity within one task
+What is weak about it:
+current_step is text-backed and looser than the docs imply
+it mixes safety-relevant state with assistant scratchpad behavior
+What it should become:
+the compact live working-memory layer
+small enough to stay in the hot context path
+stricter about which fields are authoritative versus advisory
+3. scans
+What it is:
+durable records of scan runs
+metadata about when a path was scanned, at what depth, and what was found
+What writes it:
+scan_folder in [C:/Users/jaham/aijah/backend/tools/scan_folder.py](C:/Users/jaham/aijah/backend/tools/scan_folder.py)
+What reads it today:
+assemble_context() for the “Last scan” block
+REST endpoints for scan history
+frontend scan views
+Why it exists:
+the system needs a durable record of filesystem observations across time
+What is good about it:
+first-class scan history now exists
+useful for scan lifecycle, counts, categories, and change tracking
+What is weak about it:
+it is only lightly used as reasoning input today
+the model still relies too much on raw tool output instead of querying scan-derived knowledge
+What it should become:
+the session and device-level index history layer
+the entry point for “what changed” and “what do we know about this area” questions
+4. file_entities
+What it is:
+the structured memory of known files on a device
+canonical paths plus metadata such as filename, extension, category, preview, existence status
+What writes it:
+scan_folder
+execution paths that update entities after file operations
+What reads it today:
+read_file_metadata
+execution logic when mapping actions back to tracked entities
+some backend flows that resolve targets
+Why it exists:
+the app needs a durable indexed model of the filesystem, not just a conversation about it
+What is good about it:
+this is one of the most valuable structured-memory layers in the system
+it can support narrow retrieval, duplicate detection, and organization analysis
+What is weak about it:
+there is not yet a strong general retrieval tool over it
+the model cannot ask rich questions over indexed files very well
+What it should become:
+the main factual memory for files
+the basis for targeted retrieval instead of transcript replay
+5. folder_entities
+What it is:
+the structured memory of known folders on a device
+canonical path hierarchy and folder identity
+What writes it:
+scan_folder
+execution paths when folders are created or moved
+What reads it today:
+folder-related backend and API views
+scan summaries
+some plan target resolution flows
+Why it exists:
+folder structure is the skeleton of filesystem reasoning
+What is good about it:
+it gives the system durable folder knowledge beyond one scan result
+What is weak about it:
+like file_entities, it is under-queried by the model layer
+folder understanding still often flows through scan payloads instead of narrow DB retrieval
+What it should become:
+the main structural memory for folder hierarchy and organization patterns
+6. memory_events
+What it is:
+the action and outcome log
+pre-state, intended change, action taken, post-state, and outcome
+What writes it:
+execution flows, especially execute_action
+What reads it today:
+assemble_context() for recent action summaries
+propose_plan() to prevent re-planning already successful actions in the same session
+Why it exists:
+the system needs auditability, safety history, and eventually learning from outcomes
+What is good about it:
+strong safety and audit value
+already useful as a guardrail against redundant actions
+What is weak about it:
+it is mostly append-only history today
+it is not yet a strong semantic or query-driven memory layer
+What it should become:
+the execution-history and outcome-learning layer
+useful for avoiding repeats, understanding prior successes and failures, and later retrieving analogous past work
+7. user_preferences and operational_policies
+What they are:
+durable instruction memory
+what the user prefers and what the system must obey
+What writes them:
+backend write paths and future learning or admin flows
+What reads them today:
+assemble_context() adds them directly to the system context
+Why they exist:
+stable behavior should not rely only on the model remembering recent chat
+What is good about them:
+they are already conceptually in the right place
+they are compact and appropriate for direct prompt injection
+What is weak about them:
+their lifecycle and update policy are not yet the main issue, but they still need clear ownership
+What they should become:
+the durable preference and policy layer that stays small and high-signal
+Memory Layer Summary
+These memory types are not interchangeable:
+session_messages are transcript memory
+task_state is working memory
+scans, file_entities, and folder_entities are filesystem memory
+memory_events are action-history memory
+user_preferences and operational_policies are behavior memory
+The main architectural mistake to avoid is treating transcript memory as if it were the same thing as filesystem memory or retrieval memory.
+Minimum Strong Tool Set
+This is the concrete tool set the architecture appears to want.
+1. Index Tool
+Purpose: refresh the database’s understanding of a path.
+Input: path, scan depth, maybe scan intent
+Writes: scans, file_entities, folder_entities
+Returns: compact summary plus identifiers, not giant raw payloads
+This is the evolved role of scan_folder.
+2. Retrieval Tool
+Purpose: ask narrow questions against indexed file and folder data.
+Examples:
+files under a path
+files by extension or category
+folders with highest file counts
+paths changed since last scan
+candidate duplicates by size, name, hash, or similarity
+This tool is the biggest missing piece right now. read_file_metadata is too narrow to fill this role by itself.
+3. Detail Tool
+Purpose: inspect one file or a very small set of files more deeply when needed.
+current read_file_metadata partly fits here
+a future file-preview or content-inspection tool could also live here
+This should stay narrow so the model asks for detail only after it has already narrowed the search space.
+4. Planning Tool
+Purpose: create approval-backed plans only when an operation truly needs explicit structured review.
+Use cases:
+rename and move many files
+archive duplicates
+create missing folders and move files into them
+Non-use cases:
+simple inspection,
+asking what exists,
+identifying likely duplicates,
+answering follow-up questions about a scan.
+5. Execution Tool
+Purpose: carry out approved actions safely and record the outcome.
+This part is already comparatively solid. Execution has the clearest safety boundary in the current architecture.
+Proposed Boundary Changes
+Keep
+DB as source of truth
+approval gate for risky changes
+sandbox enforcement
+scan persistence
+SSE-driven frontend activity visibility
+Split More Cleanly
+indexing from model-facing retrieval
+conversation history from retrieval memory
+assistant working state from safety-critical lifecycle state
+plan generation from simple analysis
+Stop Using As The Default Intelligence Path
+replaying full tool payloads into session_messages
+relying on giant scan outputs for understanding
+forcing propose_plan after every meaningful scan
+Plan Workstreams
+1. System Piece Audit
+Create a plain-language map of the current pieces and their responsibilities using:
+[C:/Users/jaham/aijah/docs/DB_ARCHITECTURE.md](C:/Users/jaham/aijah/docs/DB_ARCHITECTURE.md)
+[C:/Users/jaham/aijah/docs/FE_BE_INTEGRATION.md](C:/Users/jaham/aijah/docs/FE_BE_INTEGRATION.md)
+[C:/Users/jaham/aijah/docs/TOOL_DISPATCH.md](C:/Users/jaham/aijah/docs/TOOL_DISPATCH.md)
+[C:/Users/jaham/aijah/docs/STATE_MACHINE.md](C:/Users/jaham/aijah/docs/STATE_MACHINE.md)
+Deliverable: one shared mental model of frontend, backend, DB, MCP, and filesystem responsibilities.
+2. Memory Audit
+Explicitly document for each memory-like store:
+what writes it,
+what reads it today,
+what it should read for in the future,
+whether it is hot-path context, retrieval memory, audit history, or user-facing transcript.
+Priority targets:
+session_messages
+task_state
+scans
+file_entities
+folder_entities
+memory_events
+3. Tool Boundary Audit
+Review each current MCP tool by responsibility:
+scan_folder
+read_file_metadata
+propose_plan
+execute_action
+get_task_state
+update_task_state
+Deliverable: classify each tool as index, retrieve, detail, plan, execute, or state.
+4. Strong Tool Set Definition
+Define the minimum production-worthy tool surface:
+scan_or_refresh_path
+query_indexed_files
+inspect_file
+propose_plan
+execute_action
+These names are placeholders for the roles, not final naming requirements.
+5. Hot Loop Reduction
+Redesign the loop so the model sees:
+a shorter transcript window,
+a compact working-memory summary,
+targeted retrieval results,
+and references to scans or plans instead of replayed bulky JSON.
+Core architectural split:
+session_messages remain the canonical session transcript for UI, audit, and tool-call replay,
+but a separate model-ready context layer decides what subset of that transcript is actually worth sending back to the LLM.
+Key files:
+[C:/Users/jaham/aijah/backend/agent/context.py](C:/Users/jaham/aijah/backend/agent/context.py)
+[C:/Users/jaham/aijah/backend/agent/loop.py](C:/Users/jaham/aijah/backend/agent/loop.py)
+6. State Contract Simplification
+Keep plan and action status strict, but reduce the pressure on session state to describe every nuance of reasoning.
+The main question is:
+which state is protecting safety,
+and which state is only trying to narrate what the assistant is thinking.
+Only the first category needs to stay heavy and rigid.
+Expected Outcome
+If this plan is followed, AIJAH should become easier to reason about as a system:
+memory will be understood as several different layers instead of one vague concept,
+scan data will become queryable knowledge instead of mostly prompt baggage,
+the tool set will be easier for the model to use correctly,
+and the architecture will support concrete jobs like duplicate detection without pretending everything must start as a full formal plan.
+

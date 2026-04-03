@@ -20,6 +20,7 @@ async def update_task_state(
     current_step: str | None = None,
     active_plan_id: str | None = None,
     scratchpad_summary: str | None = None,
+    active_entities_json: dict | None = None,
 ) -> dict:
     session_uuid = _uuid(session_id)
     assert session_uuid is not None
@@ -44,6 +45,12 @@ async def update_task_state(
             task_state.active_plan_id = _uuid(active_plan_id)
         if scratchpad_summary is not None:
             task_state.scratchpad_summary = scratchpad_summary
+        if active_entities_json is not None:
+            # Merge into existing JSONB rather than replacing it wholesale,
+            # so loop-written scope coexists with any model-written entity refs.
+            current = task_state.active_entities_json or {}
+            current.update(active_entities_json)
+            task_state.active_entities_json = current
 
         await session.commit()
         await session.refresh(task_state)

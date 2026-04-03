@@ -12,6 +12,12 @@ from db.connection import db_manager
 from db.enums import ScanDepth, ScanStatus
 from db.models import Device, FileEntity, FolderEntity, Scan, Session
 from safety.sandbox import sandbox_service, walk_filesystem
+from services.scan_intelligence import (
+    build_file_payload,
+    build_folder_payload,
+    guess_category,
+    read_content_preview,
+)
 
 # ---------------------------------------------------------------------------
 # Limits — prevent hanging on large directories
@@ -21,96 +27,14 @@ MAX_FILES_ROOT = 5_000       # ROOT scan: immediate level only, generous limit
 MAX_FILES_DEEP = 3_000       # DEEP: metadata walk — cap at 3k files
 MAX_FILES_CONTENT = 500      # CONTENT: reads file text — much smaller cap
 
+# Model-facing payload caps — how many items the scan tool returns to the model.
+# The full indexed data remains queryable via query_indexed_files at any time.
+_FILE_SAMPLE_LIMIT = 20      # max file entries returned in any scan payload
+_FOLDER_SAMPLE_LIMIT = 50    # max folder entries returned in any scan payload
+
 # ---------------------------------------------------------------------------
-# File intelligence helpers
+# Main tool
 # ---------------------------------------------------------------------------
-
-_CATEGORY_KEYWORDS: list[tuple[str, list[str]]] = [
-    ("invoice",       ["invoice", "bill", "billing", "receipt", "payment", "statement"]),
-    ("contract",      ["contract", "agreement", "nda", "sow", "terms", "engagement"]),
-    ("draft",         ["draft", "wip", "temp", "tmp"]),
-    ("report",        ["report", "summary", "analysis", "review", "audit"]),
-    ("letter",        ["letter", "ltr", "correspondence", "memo"]),
-    ("spreadsheet",   ["budget", "forecast", "expense", "tracker", "sheet"]),
-    ("photo",         ["img", "photo", "pic", "scan", "screenshot"]),
-    ("presentation",  ["presentation", "deck", "slides", "pitch"]),
-    ("archive",       ["archive", "backup", "zip", "compressed"]),
-    ("config",        ["config", "settings", "env", "setup", ".ini", ".cfg", ".toml", ".yaml", ".yml"]),
-    ("log",           ["log", "logs", ".log"]),
-    ("notes",         ["notes", "note", "todo", "ideas", "scratch"]),
-]
-
-_TEXT_EXTENSIONS: frozenset[str] = frozenset({
-    ".txt", ".md", ".markdown", ".csv", ".log", ".rst",
-    ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg",
-    ".py", ".js", ".ts", ".html", ".css", ".xml",
-    ".sh", ".bat", ".ps1",
-})
-
-_PREVIEW_MAX_BYTES = 512
-_PREVIEW_CHARS = 200
-
-
-def _guess_category(filename: str, extension: str) -> str:
-    needle = filename.lower()
-    for category, keywords in _CATEGORY_KEYWORDS:
-        for kw in keywords:
-            if kw in needle:
-                return category
-
-    ext_map = {
-        ".pdf": "document", ".doc": "document", ".docx": "document",
-        ".xls": "spreadsheet", ".xlsx": "spreadsheet",
-        ".ppt": "presentation", ".pptx": "presentation",
-        ".jpg": "photo", ".jpeg": "photo", ".png": "photo",
-        ".gif": "photo", ".webp": "photo", ".heic": "photo",
-        ".mp4": "video", ".mov": "video", ".avi": "video",
-        ".mp3": "audio", ".wav": "audio", ".m4a": "audio",
-        ".zip": "archive", ".tar": "archive", ".gz": "archive", ".7z": "archive",
-    }
-    if extension in ext_map:
-        return ext_map[extension]
-
-    return "unknown"
-
-
-def _read_content_preview(file_path: Path, extension: str) -> str | None:
-    if extension not in _TEXT_EXTENSIONS:
-        return None
-    try:
-        with open(file_path, "r", encoding="utf-8", errors="replace") as fh:
-            raw = fh.read(_PREVIEW_MAX_BYTES)
-        preview = raw[:_PREVIEW_CHARS].strip()
-        preview = " ".join(preview.split())
-        return preview if preview else None
-    except OSError:
-        return None
-
-
-def _to_iso(value) -> str | None:
-    return value.isoformat() if value is not None else None
-
-
-def _folder_payload(folder: FolderEntity) -> dict:
-    return {
-        "id": str(folder.id),
-        "canonical_path": folder.canonical_path,
-        "folder_name": folder.folder_name,
-        "parent_path": folder.parent_path,
-    }
-
-
-def _file_payload(file_entity: FileEntity) -> dict:
-    return {
-        "id": str(file_entity.id),
-        "canonical_path": file_entity.canonical_path,
-        "filename": file_entity.filename,
-        "extension": file_entity.extension or "",
-        "size_bytes": file_entity.size_bytes,
-        "modified_at": _to_iso(file_entity.modified_at),
-        "guessed_category": file_entity.guessed_category,
-        "content_preview": file_entity.content_preview,
-    }
 
 
 def _count_immediate_children(folder_path: Path) -> int:
@@ -119,11 +43,6 @@ def _count_immediate_children(folder_path: Path) -> int:
         return sum(1 for _ in folder_path.iterdir())
     except (PermissionError, OSError):
         return 0
-
-
-# ---------------------------------------------------------------------------
-# Main tool
-# ---------------------------------------------------------------------------
 
 
 async def scan_folder(
@@ -262,8 +181,8 @@ async def scan_folder(
                 seen_file_paths.add(canonical)
                 metadata = sandbox_service.metadata_for_path(file_path)
                 extension = metadata.extension or ""
-                category = _guess_category(file_path.name, extension)
-                preview = _read_content_preview(file_path, extension) if read_content else None
+                category = guess_category(file_path.name, extension)
+                preview = read_content_preview(file_path, extension) if read_content else None
                 category_counter[category] += 1
 
                 existing = existing_files_map.get(canonical)
@@ -386,20 +305,41 @@ async def scan_folder(
             for folder in folder_entities:
                 if Path(folder.canonical_path) == directory:
                     continue
-                payload = _folder_payload(folder)
-                payload["child_count"] = folder_child_counts.get(folder.canonical_path, 0)
+                payload = build_folder_payload(
+                    folder,
+                    child_count=folder_child_counts.get(folder.canonical_path, 0),
+                )
                 subfolder_payloads.append(payload)
             subfolder_payloads.sort(key=lambda f: f["child_count"], reverse=True)
+
+            # Cap file list — full data is in file_entities / query_indexed_files
+            file_sample = [build_file_payload(fe) for fe in file_entities[:_FILE_SAMPLE_LIMIT]]
+            file_sample_note = (
+                f" (showing {_FILE_SAMPLE_LIMIT} of {len(file_entities)} — use query_indexed_files for more)"
+                if len(file_entities) > _FILE_SAMPLE_LIMIT else ""
+            )
+
+            # Cap folder list — full data is in folder_entities / query_indexed_files
+            folders_truncated = len(subfolder_payloads) > _FOLDER_SAMPLE_LIMIT
+            folder_sample = subfolder_payloads[:_FOLDER_SAMPLE_LIMIT]
+            folder_sample_note = (
+                f" (showing {_FOLDER_SAMPLE_LIMIT} of {len(subfolder_payloads)} — use query_indexed_files for more)"
+                if folders_truncated else ""
+            )
 
             return {
                 "scan_id": str(scan_id),
                 "scan_depth": depth.value,
-                "files": [_file_payload(fe) for fe in file_entities],
-                "folders": subfolder_payloads,
+                "file_count": len(file_entities),
+                "folder_count": len(subfolder_payloads),
+                "file_sample": file_sample,
+                "folders": folder_sample,
                 "summary": (
                     f"Root scan of {scan_root}: found {len(subfolder_payloads)} subfolders"
                     + (f" and {len(file_entities)} files at this level." if file_entities else ".")
                     + truncation_note
+                    + file_sample_note
+                    + folder_sample_note
                 ),
                 "changes": {"new_files": new_file_count, "deleted_files": 0},
                 "categories": dict(category_counter.most_common()),
@@ -417,10 +357,11 @@ async def scan_folder(
 
         folder_payloads = []
         for folder in folder_entities:
-            payload = _folder_payload(folder)
-            payload["file_count"] = folder_file_counts.get(folder.canonical_path, 0)
-            payload["categories_present"] = folder_categories.get(folder.canonical_path, [])
-            folder_payloads.append(payload)
+            folder_payloads.append(build_folder_payload(
+                folder,
+                file_count=folder_file_counts.get(folder.canonical_path, 0),
+                categories_present=folder_categories.get(folder.canonical_path, []),
+            ))
 
         # Sort folders by file count descending — most active folders first.
         folder_payloads.sort(key=lambda f: f["file_count"], reverse=True)
@@ -428,29 +369,37 @@ async def scan_folder(
         # DEEP / CONTENT scans can return thousands of files. Sending the raw
         # file list to the model inflates the context to 200k+ tokens, hitting
         # API limits and degrading quality. Instead we return only:
-        #   - folder-level summaries (already computed above)
-        #   - a small representative sample of files (up to 20)
+        #   - folder-level summaries (capped, already computed above)
+        #   - a small representative sample of files (up to _FILE_SAMPLE_LIMIT)
         #   - aggregate stats and categories
         # The full detail is stored in file_entities / folder_entities in the DB
-        # and can be retrieved via query_files when the model needs specifics.
-        _FILE_SAMPLE_LIMIT = 20
-        file_sample = [_file_payload(fe) for fe in file_entities[:_FILE_SAMPLE_LIMIT]]
+        # and can be retrieved via query_indexed_files when the model needs specifics.
+        file_sample = [build_file_payload(fe) for fe in file_entities[:_FILE_SAMPLE_LIMIT]]
         file_sample_note = (
-            f" (showing {_FILE_SAMPLE_LIMIT} of {len(file_entities)} — use query_files for more)"
+            f" (showing {_FILE_SAMPLE_LIMIT} of {len(file_entities)} — use query_indexed_files for more)"
             if len(file_entities) > _FILE_SAMPLE_LIMIT else ""
+        )
+
+        # Cap folder list too — large directory trees can produce hundreds of folder payloads.
+        folders_truncated = len(folder_payloads) > _FOLDER_SAMPLE_LIMIT
+        folder_sample = folder_payloads[:_FOLDER_SAMPLE_LIMIT]
+        folder_sample_note = (
+            f" (showing {_FOLDER_SAMPLE_LIMIT} of {len(folder_payloads)} folders — use query_indexed_files for more)"
+            if folders_truncated else ""
         )
 
         return {
             "scan_id": str(scan_id),
             "scan_depth": depth.value,
             "file_count": len(file_entities),
-            "folder_count": len(folder_entities),
+            "folder_count": len(folder_payloads),
             "file_sample": file_sample,
-            "folders": folder_payloads,
+            "folders": folder_sample,
             "summary": (
-                f"Scanned {len(file_entities)} files across {len(folder_entities)} folders."
+                f"Scanned {len(file_entities)} files across {len(folder_payloads)} folders."
                 + truncation_note
                 + file_sample_note
+                + folder_sample_note
             ),
             "changes": {"new_files": new_file_count, "deleted_files": deleted_file_count},
             "categories": dict(category_counter.most_common()),

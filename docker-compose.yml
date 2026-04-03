@@ -13,6 +13,9 @@ services:
       # host.docker.internal resolves to the host machine from inside any Docker container.
       # On Linux, the extra_hosts entry below makes this hostname available.
       - MCP_URL=http://host.docker.internal:8001/mcp
+      # SANDBOX_ROOT must match the native MCP server's SANDBOX_ROOT exactly
+      # so the model uses the same path prefix the MCP server validates against.
+      - SANDBOX_ROOT=/Users/amira/AIJAH/AI-Librarian/sandbox
     extra_hosts:
       # Ensures host.docker.internal works on Linux (automatic on Mac and Windows).
       - "host.docker.internal:host-gateway"

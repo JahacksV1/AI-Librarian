@@ -19,7 +19,11 @@ export function ConversationPanel({ messages, disabled, error, onSend }: Convers
       <div className="messages">
         {!messages.length && <div className="panel-empty">Type a message to start.</div>}
         {messages.map((message) => (
-          <MessageBubble key={message.id} message={message} />
+          <MessageBubble
+            key={message.id}
+            message={message}
+            onSuggest={disabled ? undefined : (text) => void onSend(text)}
+          />
         ))}
       </div>
 
